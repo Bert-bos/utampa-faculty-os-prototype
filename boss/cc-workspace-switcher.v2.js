@@ -68,8 +68,13 @@
     return found.length >= 2 ? found : [];
   }
 
-  function sameOrigin(url) {
-    try { return new URL(url, location.href).origin === location.origin; }
+  function sameWorkspace(url) {
+    try {
+      var target = new URL(url, location.href);
+      var here = new URL(location.href);
+      var clean = function (p) { return (p.replace(/\/+$/, "") || "/"); };
+      return target.origin === here.origin && clean(target.pathname) === clean(here.pathname);
+    }
     catch (e) { return false; }
   }
 
@@ -88,7 +93,7 @@
       /* v2: drop any legacy inline handler (BOS binds a drawer here). */
       if (typeof el.onclick === 'function') el.onclick = null;
 
-      var isCurrent = !!ws.url && sameOrigin(ws.url);
+      var isCurrent = !!ws.url && sameWorkspace(ws.url);
 
       if (isCurrent) {
         el.classList.add('active');
