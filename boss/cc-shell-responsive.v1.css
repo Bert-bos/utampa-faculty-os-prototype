@@ -1,0 +1,91 @@
+/* ==========================================================================
+   cc-shell-responsive.v1.css
+   Claude lane — shared application-shell responsive corrections.
+   Return ID: CC-20260905-FIX-033   Built + verified 2026-09-05T05:00Z
+
+   Fixes, all VERIFIED against the two live sites at 390px and 1280px by
+   injecting this exact rule set into each running page and re-measuring:
+     N1  UTampa record control had no id="quickRecord"      -> see cc-shell-shim.v1.js
+     N2  UTampa switcher display:none below 1181px          -> FIXED, verified
+     N3  EP/UTampa shells disagreed below 1250px            -> FIXED, unified
+     N4  EP record control 0x0 (parent .header-actions none)-> FIXED, verified 44px+
+     N1b EP #quickRecord had no aria-label                  -> see cc-shell-shim.v1.js
+
+   LOAD ORDER: LAST stylesheet in <head>, after every existing site stylesheet.
+   Both sites include the SAME file. No per-site fork.
+
+   Covers both markup vocabularies:
+     UTampa : .centeredSwitcher (inside .appTop.unifiedHeader, display:flex)
+     EP     : .workspace-switcher (inside a display:grid header)
+   ========================================================================== */
+
+/* ---- Desktop (>=1251px): one centered switcher on both sites (N3) ------- */
+@media (min-width: 1251px) {
+  .centeredSwitcher,
+  .workspace-switcher {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    justify-self: center;
+    margin-left: 0;
+    margin-right: 0;
+  }
+}
+
+/* ---- Below 1251px: identical reflow to a centered second row (N2, N3) ---
+   Overrides UTampa's @media (width<=1180px) and (width<=760px) display:none,
+   and EP's earlier conflicting max-width:1250px display:none block.        */
+@media (max-width: 1250px) {
+
+  /* flex headers must be allowed to wrap so the switcher gets its own row */
+  header,
+  .appTop,
+  .unifiedHeader,
+  .header-right { flex-wrap: wrap !important; }
+
+  .centeredSwitcher,
+  .workspace-switcher {
+    display: flex !important;
+    position: static !important;
+    transform: none !important;
+    flex: 0 0 100% !important;              /* own row in a flex header      */
+    grid-area: 2 / 1 / auto / -1;           /* own row in a grid header      */
+    justify-self: stretch;
+    width: auto !important;
+    max-width: calc(100vw - 32px) !important; /* never exceed the viewport   */
+    min-width: 0 !important;
+    box-sizing: border-box;
+    order: 99;
+    margin: 8px auto 0 auto;
+    justify-content: center;
+    align-items: center;
+    flex-wrap: wrap !important;             /* long third label wraps        */
+    gap: 6px;
+  }
+
+  .centeredSwitcher > *,
+  .workspace-switcher > * { max-width: 100%; min-width: 0; }
+
+  /* ---- Record control must exist and be pressable on mobile (N4) -------- */
+  .header-actions { display: flex !important; align-items: center; }
+
+  #quickRecord,
+  button.globalRecord {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;                        /* WCAG 2.5.5 target size        */
+    min-height: 44px;
+  }
+
+  header { overflow-x: clip; }
+}
+
+/* ---- Visible keyboard focus preserved on every shell control ------------ */
+.centeredSwitcher :focus-visible,
+.workspace-switcher :focus-visible,
+#quickRecord:focus-visible,
+button.globalRecord:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}

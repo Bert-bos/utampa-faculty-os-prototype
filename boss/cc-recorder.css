@@ -1,0 +1,137 @@
+/* ============================================================================
+   SHARED RECORDING COMPONENT — STYLE — CC-20260904-INTDASH-009
+   Identical in all three workspaces. Uses --cc-accent, already set per
+   workspace by the integration layer (UTampa #CE0E2D · BOSS #0B7DB8 ·
+   Entrepreneurship Professor #F26522). Scoped entirely under .cc-rec so it
+   cannot reach any approved styling.
+   ==========================================================================*/
+.cc-rec { position: fixed; inset: 0; z-index: 2147483000; }
+.cc-rec[hidden] { display: none !important; }
+
+.cc-rec__scrim {
+  position: absolute; inset: 0;
+  background: rgba(15, 23, 42, .38);
+  opacity: 0; transition: opacity .18s ease;
+}
+.cc-rec.is-open .cc-rec__scrim { opacity: 1; }
+
+.cc-rec__panel {
+  position: absolute; top: 0; right: 0; bottom: 0;
+  width: min(420px, 100%);
+  box-sizing: border-box;
+  padding: 22px 22px 26px;
+  background: #fff;
+  color: #0f172a;
+  font: 400 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  box-shadow: -18px 0 46px rgba(15, 23, 42, .18);
+  overflow-y: auto;
+  transform: translateX(100%);
+  transition: transform .22s cubic-bezier(.2, .7, .3, 1);
+  display: flex; flex-direction: column; gap: 14px;
+}
+.cc-rec.is-open .cc-rec__panel { transform: none; }
+
+.cc-rec__close {
+  position: absolute; top: 12px; right: 14px;
+  width: 32px; height: 32px; border: 0; border-radius: 8px;
+  background: transparent; color: #64748b;
+  font-size: 21px; line-height: 1; cursor: pointer;
+}
+.cc-rec__close:hover { background: rgba(15, 23, 42, .06); color: #0f172a; }
+
+.cc-rec__eyebrow {
+  font-size: 11px; font-weight: 700; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--cc-accent, #0B7DB8);
+}
+.cc-rec__title { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -.01em; }
+.cc-rec__sub { margin: 0; color: #64748b; font-size: 13px; }
+
+/* --- timer ---------------------------------------------------------------- */
+.cc-rec__meter {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 16px; border-radius: 12px;
+  background: rgba(15, 23, 42, .04);
+}
+.cc-rec__dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: #cbd5e1; flex: 0 0 auto;
+}
+.cc-rec[data-cc-state="recording"] .cc-rec__dot {
+  background: #dc2626; animation: cc-rec-pulse 1.1s ease-in-out infinite;
+}
+.cc-rec[data-cc-state="paused"] .cc-rec__dot { background: #f59e0b; }
+.cc-rec[data-cc-state="stopped"] .cc-rec__dot,
+.cc-rec[data-cc-state="saved"] .cc-rec__dot { background: #0f766e; }
+@keyframes cc-rec-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .28 } }
+@media (prefers-reduced-motion: reduce) {
+  .cc-rec__dot { animation: none !important; }
+  .cc-rec__panel, .cc-rec__scrim { transition: none !important; }
+}
+
+.cc-rec__time {
+  font: 700 26px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .01em;
+}
+.cc-rec__state {
+  margin-left: auto; font-size: 12px; font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase; color: #64748b;
+}
+.cc-rec[data-cc-state="recording"] .cc-rec__state { color: #dc2626; }
+.cc-rec[data-cc-state="paused"] .cc-rec__state { color: #b45309; }
+.cc-rec[data-cc-state="saved"] .cc-rec__state { color: #0f766e; }
+
+/* --- buttons -------------------------------------------------------------- */
+.cc-rec__controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.cc-rec__btn {
+  appearance: none; border: 1px solid rgba(15, 23, 42, .14);
+  background: #fff; color: #0f172a;
+  border-radius: 10px; padding: 9px 15px;
+  font: 600 13px/1 inherit; cursor: pointer;
+  transition: background .14s ease, border-color .14s ease, opacity .14s ease;
+  flex: 0 0 auto;
+}
+.cc-rec__btn:hover:not(:disabled) { background: rgba(15, 23, 42, .05); }
+.cc-rec__btn:focus-visible { outline: 2px solid var(--cc-accent, #0B7DB8); outline-offset: 2px; }
+.cc-rec__btn:disabled { opacity: .42; cursor: not-allowed; }
+.cc-rec__btn--primary,
+.cc-rec__btn--save {
+  background: var(--cc-accent, #0B7DB8); border-color: transparent; color: #fff;
+}
+.cc-rec__btn--primary:hover:not(:disabled),
+.cc-rec__btn--save:hover:not(:disabled) { filter: brightness(1.06); background: var(--cc-accent, #0B7DB8); }
+
+/* --- destination ---------------------------------------------------------- */
+.cc-rec__field { display: flex; flex-direction: column; gap: 7px; }
+.cc-rec__label { font-size: 12px; font-weight: 700; color: #334155; }
+.cc-rec__destrow { display: flex; gap: 8px; align-items: stretch; min-width: 0; }
+.cc-rec__select {
+  flex: 1 1 auto; min-width: 0;
+  border: 1px solid rgba(15, 23, 42, .18); border-radius: 10px;
+  padding: 9px 11px; font: 400 13px/1.2 inherit; background: #fff; color: #0f172a;
+}
+.cc-rec__select:focus-visible { outline: 2px solid var(--cc-accent, #0B7DB8); outline-offset: 1px; }
+.cc-rec__select:disabled { opacity: .55; }
+.cc-rec__note { margin: 0; font-size: 12px; color: #64748b; }
+.cc-rec__note.is-ok { color: #0f766e; font-weight: 600; }
+
+/* --- footer --------------------------------------------------------------- */
+.cc-rec__foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 2px; }
+.cc-rec__hint { font-size: 12px; color: #64748b; flex: 1 1 140px; min-width: 0; }
+.cc-rec__done {
+  margin: 0; padding: 11px 13px; border-radius: 10px;
+  background: rgba(15, 118, 110, .08); color: #0f766e;
+  font-size: 13px; font-weight: 600;
+}
+.cc-rec__done[hidden] { display: none; }
+
+/* --- narrow widths: the panel becomes a bottom sheet ---------------------- */
+@media (max-width: 520px) {
+  .cc-rec__panel {
+    top: auto; left: 0; right: 0; bottom: 0;
+    width: 100%; max-height: 88vh; border-radius: 16px 16px 0 0;
+    transform: translateY(100%);
+    box-shadow: 0 -18px 46px rgba(15, 23, 42, .2);
+  }
+  .cc-rec.is-open .cc-rec__panel { transform: none; }
+}
