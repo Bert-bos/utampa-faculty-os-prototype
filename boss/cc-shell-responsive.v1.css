@@ -10,19 +10,28 @@
      N3  EP/UTampa shells disagreed below 1250px            -> FIXED, unified
      N4  EP record control 0x0 (parent .header-actions none)-> FIXED, verified 44px+
      N1b EP #quickRecord had no aria-label                  -> see cc-shell-shim.v1.js
+     N5  BOS (/boss/) .product-switcher used an uncovered   -> FIXED, verified
+         third markup vocabulary, so it never got the N2/N3
+         reflow-to-own-row treatment: at <=1250px it stayed
+         inline in .global-header (a single fixed-height flex
+         row) and overlapped the search icon, avatar, and the
+         sticky .section-nav row beneath it. 2026-09-07.
 
    LOAD ORDER: LAST stylesheet in <head>, after every existing site stylesheet.
-   Both sites include the SAME file. No per-site fork.
+   All three shells include the SAME file. No per-site fork.
 
-   Covers both markup vocabularies:
+   Covers three markup vocabularies:
      UTampa : .centeredSwitcher (inside .appTop.unifiedHeader, display:flex)
      EP     : .workspace-switcher (inside a display:grid header)
+     BOS    : .product-switcher (inside .global-header, display:flex;
+              height:78/88/68px; followed by a sticky .section-nav)
    ========================================================================== */
 
 /* ---- Desktop (>=1251px): one centered switcher on both sites (N3) ------- */
 @media (min-width: 1251px) {
   .centeredSwitcher,
-  .workspace-switcher {
+  .workspace-switcher,
+  .product-switcher {
     position: absolute;
     left: 50%;
     transform: translateX(-50%);
@@ -41,10 +50,19 @@
   header,
   .appTop,
   .unifiedHeader,
-  .header-right { flex-wrap: wrap !important; }
+  .header-right,
+  .global-header { flex-wrap: wrap !important; }
+
+  /* BOS's .global-header sets a fixed pixel height (68/78/88px depending on
+     breakpoint and alert state) rather than min-height, so simply allowing
+     it to wrap is not enough: the wrapped second row overflows the fixed
+     box instead of growing it, landing on top of .section-nav below.
+     Let the box grow to fit its now-two-row content. */
+  .global-header { height: auto !important; }
 
   .centeredSwitcher,
-  .workspace-switcher {
+  .workspace-switcher,
+  .product-switcher {
     display: flex !important;
     position: static !important;
     transform: none !important;
@@ -64,7 +82,8 @@
   }
 
   .centeredSwitcher > *,
-  .workspace-switcher > * { max-width: 100%; min-width: 0; }
+  .workspace-switcher > *,
+  .product-switcher > * { max-width: 100%; min-width: 0; }
 
   /* ---- Record control must exist and be pressable on mobile (N4) -------- */
   .header-actions { display: flex !important; align-items: center; }
@@ -79,11 +98,22 @@
   }
 
   header { overflow-x: clip; }
+
+  /* ---- N5: BOS's .product-switcher now wraps to its own row, so
+     .global-header renders taller than the 68/88/140px this page's own
+     CSS assumes for .section-nav's sticky offset. Rather than replicate
+     BOS's own alert-active/breakpoint height math here (this file stays
+     one shared rule set with no per-site pixel knowledge), drop the
+     sticky positioning at this width: the nav still renders identically,
+     it just scrolls with the page instead of staying pinned, so it can
+     never sit on top of the taller wrapped header. */
+  .section-nav { position: static !important; top: auto !important; }
 }
 
 /* ---- Visible keyboard focus preserved on every shell control ------------ */
 .centeredSwitcher :focus-visible,
 .workspace-switcher :focus-visible,
+.product-switcher :focus-visible,
 #quickRecord:focus-visible,
 button.globalRecord:focus-visible {
   outline: 2px solid currentColor;
