@@ -74,6 +74,7 @@ jobs:
             page.on('console', message => diagnostics.push('console:' + message.type() + ':' + message.text()));
             page.on('pageerror', error => diagnostics.push('pageerror:' + String(error)));
             page.on('requestfailed', request => diagnostics.push('requestfailed:' + request.url() + ':' + (request.failure() && request.failure().errorText)));
+            page.on('response', response => { if (response.url().includes('cc-workspace-switcher')) diagnostics.push('response:' + response.status() + ':' + response.url()); });
             await page.goto(base + '/login', { waitUntil: 'domcontentloaded' });
             await page.locator('input[name=username]').fill('evidence-user');
             await page.locator('input[name=password]').fill('synthetic-evidence-password');
@@ -85,7 +86,8 @@ jobs:
                 const response = await fetch('/cc-workspace-switcher.v2.js');
                 return { status: response.status, text: (await response.text()).slice(0, 120) };
               });
-              throw new Error('switcher did not wire: ' + JSON.stringify({ url: page.url(), scriptState, diagnostics }));
+              const domState = await page.evaluate(() => ({ marker: window.__ccWorkspaceSwitcherWired, scripts: Array.from(document.scripts).map(s => s.src || '[inline]').slice(-12), tail: document.documentElement.outerHTML.slice(-1200) }));
+              throw new Error('switcher did not wire: ' + JSON.stringify({ url: page.url(), scriptState, domState, diagnostics }));
             }
           }
           (async () => {
