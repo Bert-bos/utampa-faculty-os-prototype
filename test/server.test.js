@@ -138,6 +138,12 @@ test("verified allowlisted identity creates an opaque revocable session and pres
   const externalLocation = new URL(external.headers.get("location"));
   const externalCallback = await fetch(`${origin}/auth/google/callback?state=${externalLocation.searchParams.get("state")}&code=valid-code`, { headers: { Cookie: firstCookie(external, "utampa_oauth_tx") }, redirect: "manual" });
   assert.equal(externalCallback.headers.get("location"), "/");
+  for (const maliciousNext of ["/\\evil.example", "/%5cevil.example", "/%255cevil.example", "/%2f%2fevil.example", "/logout", "/auth/google"]) {
+    const attempt = await fetch(`${origin}/auth/google?next=${encodeURIComponent(maliciousNext)}`, { redirect: "manual" });
+    const attemptLocation = new URL(attempt.headers.get("location"));
+    const callback = await fetch(`${origin}/auth/google/callback?state=${attemptLocation.searchParams.get("state")}&code=valid-code`, { headers: { Cookie: firstCookie(attempt, "utampa_oauth_tx") }, redirect: "manual" });
+    assert.equal(callback.headers.get("location"), "/", maliciousNext);
+  }
 });
 
 test("only health and OAuth entry surfaces are public; private bytes default deny", async t => {
@@ -212,6 +218,17 @@ test("Google provider verifies token signature and required claims", async () =>
   assert.deepEqual(identity, { sub: claims.sub, email: claims.email });
   assert.match(String(requests[0].options.body), /code_verifier=verifier/);
   await assert.rejects(() => provider.exchangeAndVerify({ code: "code", codeVerifier: "verifier", expectedNonce: "wrong" }), /claims rejected/);
+
+  const conflictingPayload = Buffer.from(JSON.stringify({ ...claims, azp: "other-client" })).toString("base64url");
+  const conflictingSignature = crypto.sign("RSA-SHA256", Buffer.from(`${header}.${conflictingPayload}`), privateKey).toString("base64url");
+  const conflictingToken = `${header}.${conflictingPayload}.${conflictingSignature}`;
+  const conflictingProvider = createGoogleOAuthProvider({
+    clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: REDIRECT_URI, now: () => now,
+    fetchImpl: async url => url.includes("/token")
+      ? new Response(JSON.stringify({ id_token: conflictingToken }), { status: 200, headers: { "content-type": "application/json" } })
+      : new Response(JSON.stringify({ keys: [jwk] }), { status: 200, headers: { "content-type": "application/json" } })
+  });
+  await assert.rejects(() => conflictingProvider.exchangeAndVerify({ code: "code", codeVerifier: "verifier", expectedNonce: "expected-nonce" }), /claims rejected/);
 });
 
 test("repository data contract stays synthetic and unknown is never coerced to zero", () => {

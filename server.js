@@ -74,8 +74,20 @@ function parseCookies(header = "") {
 }
 
 function safeNext(value) {
-  return typeof value === "string" && value.startsWith("/") && !value.startsWith("//") &&
-    !value.startsWith("/login") && !value.startsWith("/auth/") ? value : "/";
+  if (typeof value !== "string") return "/";
+  let candidate = value;
+  try {
+    for (let pass = 0; pass < 3; pass += 1) {
+      if (/[\\\u0000-\u001f\u007f]/.test(candidate)) return "/";
+      const decoded = decodeURIComponent(candidate);
+      if (decoded === candidate) break;
+      candidate = decoded;
+    }
+    const parsed = new URL(candidate, "https://utampa.invalid");
+    if (parsed.origin !== "https://utampa.invalid" || !candidate.startsWith("/") || candidate.startsWith("//")) return "/";
+    if (/^\/(?:login|logout|auth|__test)(?:\/|\?|$)/i.test(candidate)) return "/";
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch { return "/"; }
 }
 
 function securityHeaders(contentType) {
@@ -143,8 +155,9 @@ function createGoogleOAuthProvider(config) {
       const verified = crypto.verify("RSA-SHA256", Buffer.from(`${parts[0]}.${parts[1]}`), crypto.createPublicKey({ key: jwk, format: "jwk" }), Buffer.from(parts[2], "base64url"));
       if (!verified) throw new Error("identity token signature rejected");
       const seconds = Math.floor(now() / 1000);
-      const audienceOk = claims.aud === clientId || (Array.isArray(claims.aud) && claims.aud.includes(clientId) && claims.azp === clientId);
-      if (!GOOGLE_ISSUERS.has(claims.iss) || !audienceOk || !Number.isFinite(claims.exp) || claims.exp <= seconds ||
+      const audienceOk = claims.aud === clientId || (Array.isArray(claims.aud) && claims.aud.includes(clientId));
+      const authorizedPartyOk = claims.azp === undefined ? !Array.isArray(claims.aud) : claims.azp === clientId;
+      if (!GOOGLE_ISSUERS.has(claims.iss) || !audienceOk || !authorizedPartyOk || !Number.isFinite(claims.exp) || claims.exp <= seconds ||
           (Number.isFinite(claims.iat) && claims.iat > seconds + 300) || claims.nonce !== expectedNonce ||
           claims.email_verified !== true || typeof claims.email !== "string" || typeof claims.sub !== "string" || !claims.sub) {
         throw new Error("identity token claims rejected");
