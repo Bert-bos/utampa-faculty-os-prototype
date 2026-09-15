@@ -33,7 +33,7 @@
     { key: 'utampa', match: /^u\s*tampa|faculty\s*os/i,
       url: 'https://utampa-faculty-os-prototype.onrender.com/' },
     { key: 'bos',    match: /^bos\b|^boss\b/i,
-      url: 'https://utampa-faculty-os-prototype.onrender.com/boss/' },
+      url: null },
     { key: 'ep',     match: /entrepreneurship\s*professor/i,
       url: 'https://entrepreneurship-professor-prototype.onrender.com/' }
   ];
