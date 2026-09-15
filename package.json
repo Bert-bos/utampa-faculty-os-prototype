@@ -1,0 +1,13 @@
+{
+  "name": "utampa-faculty-os-prototype",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Authenticated delivery shell for the private UTampa Faculty OS prototype.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  }
+}
