@@ -1,0 +1,156 @@
+name: UTampa exact-head browser evidence
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/browser-evidence.yml'
+      - 'server.js'
+      - 'test/server.test.js'
+      - 'cc-workspace-switcher.v2.js'
+      - 'index.html'
+      - 'assets/**'
+      - 'data/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      RC_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      NODE_ENV: test
+      PORT: 4175
+      UTAMPA_USERNAME: evidence-user
+      UTAMPA_PASSWORD: synthetic-evidence-password
+      UTAMPA_SESSION_SECRET: synthetic-evidence-session-secret-32-chars
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify exact checkout and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RC_SHA"
+          npm install --ignore-scripts --no-audit --no-fund
+          npm test
+          node server.js >utampa.log 2>&1 &
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:4175/healthz >/dev/null; then exit 0; fi
+            sleep 0.5
+          done
+          cat utampa.log
+          exit 1
+
+      - name: Capture synthetic exact-head browser states
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHROME_BIN="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true)"
+          test -n "$CHROME_BIN"
+          export CHROME_BIN
+          npm install --no-save --ignore-scripts playwright-core@1.55.0
+          mkdir -p evidence
+          cat > evidence.cjs <<'NODE'
+          const fs = require('fs');
+          const { chromium } = require('playwright-core');
+          const base = 'http://127.0.0.1:4175';
+          const evidence = { exactHead: process.env.RC_SHA, data: 'repository synthetic fixture only; no real/private/FERPA/student/founder data', screenshots: [], checks: {}, failures: [] };
+          const assert = (ok, message) => { if (!ok) evidence.failures.push(message); };
+          async function shot(page, name) {
+            await page.screenshot({ path: 'evidence/' + name + '.png', fullPage: true });
+            evidence.screenshots.push(name + '.png');
+            const geometry = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
+            evidence.checks[name] = { url: page.url(), title: await page.title(), text: (await page.locator('body').innerText()).slice(0, 1800), geometry };
+            return evidence.checks[name];
+          }
+          async function login(page) {
+            await page.goto(base + '/login', { waitUntil: 'domcontentloaded' });
+            await page.locator('input[name=username]').fill('evidence-user');
+            await page.locator('input[name=password]').fill('synthetic-evidence-password');
+            await Promise.all([page.waitForURL(base + '/'), page.locator('button[type=submit]').click()]);
+            await page.waitForSelector('[data-cc-workspace="bos"]');
+          }
+          (async () => {
+            const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_BIN, args: ['--no-sandbox'] });
+            try {
+              for (const [name, width, height] of [['01-login-desktop-1440',1440,1000],['02-login-mobile-390',390,844],['03-login-mobile-375',375,812]]) {
+                const page = await browser.newPage({ viewport: { width, height } });
+                await page.goto(base + '/login', { waitUntil: 'domcontentloaded' });
+                const state = await shot(page, name);
+                assert(/synthetic demonstration data only/i.test(state.text), name + ' provenance label');
+                assert(state.geometry.scrollWidth <= state.geometry.clientWidth, name + ' overflow');
+                await page.close();
+              }
+
+              const invalid = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              await invalid.goto(base + '/login');
+              await invalid.locator('input[name=username]').fill('evidence-user');
+              await invalid.locator('input[name=password]').fill('wrong-password');
+              await invalid.locator('button[type=submit]').click();
+              await invalid.waitForSelector('[role=alert]');
+              const invalidState = await shot(invalid, '04-invalid-login-mobile-390');
+              assert(/sign-in failed/i.test(invalidState.text), 'invalid login message');
+              await invalid.close();
+
+              for (const [name, width, height] of [['05-dashboard-desktop-1440',1440,1000],['06-dashboard-mobile-390',390,844],['07-dashboard-mobile-375',375,812]]) {
+                const page = await browser.newPage({ viewport: { width, height } });
+                await login(page);
+                const state = await shot(page, name);
+                assert(state.geometry.scrollWidth <= state.geometry.clientWidth, name + ' overflow');
+                const bos = page.locator('[data-cc-workspace="bos"]');
+                assert(await bos.getAttribute('aria-disabled') === 'true', name + ' BOS disabled');
+                assert(/not deployed/i.test(await bos.getAttribute('title') || ''), name + ' BOS pending title');
+                const fixture = await page.evaluate(async () => {
+                  const r = await fetch('/data/spartan-incubator.fixture.json');
+                  return { status: r.status, body: await r.json() };
+                });
+                assert(fixture.status === 200 && fixture.body.__synthetic === true, name + ' synthetic fixture');
+                assert(/sample data|synthetic/i.test(state.text), name + ' visible data provenance');
+                await page.close();
+              }
+
+              const failSafe = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              await login(failSafe);
+              const response = await failSafe.goto(base + '/boss/', { waitUntil: 'domcontentloaded' });
+              const failState = await shot(failSafe, '08-bos-direct-link-fail-safe-404');
+              assert(response.status() === 404 && /not found/i.test(failState.text), 'BOS direct route fail safe');
+              await failSafe.close();
+
+              evidence.verdict = evidence.failures.length ? 'FAIL' : 'PASS';
+              fs.writeFileSync('evidence/evidence.json', JSON.stringify(evidence, null, 2));
+              if (evidence.failures.length) process.exitCode = 1;
+            } finally {
+              await browser.close();
+            }
+          })().catch(error => { evidence.verdict = 'ERROR'; evidence.fatal = String(error.stack || error); fs.writeFileSync('evidence/evidence.json', JSON.stringify(evidence, null, 2)); console.error(error); process.exit(1); });
+          NODE
+          node evidence.cjs
+
+      - name: Manifest and checksums
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp utampa.log evidence/utampa.log 2>/dev/null || true
+          {
+            echo "UTAMPA_EXACT_BROWSER_EVIDENCE_READY"
+            echo "EXACT_HEAD=$RC_SHA"
+            echo "RUN_URL=https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "DATA=repository synthetic fixture only; no real/private/FERPA/student/founder data"
+          } > evidence/MANIFEST.txt
+          find evidence -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > evidence/SHA256SUMS.txt
+
+      - name: Upload exact evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: utampa-exact-browser-evidence
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
