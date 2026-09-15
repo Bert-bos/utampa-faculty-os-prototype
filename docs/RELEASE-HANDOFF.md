@@ -1,6 +1,6 @@
 # UTampa Faculty OS release handoff
 
-This repository now owns a self-contained, server-enforced authentication boundary around the approved static UTampa dashboard. The approved dashboard HTML, responsive CSS, Spartan Incubator adapter, synthetic fixture, and adapter contract are unchanged by the authentication work.
+This repository now owns a self-contained, server-enforced authentication boundary around the static UTampa dashboard. The approved dashboard HTML, responsive CSS, Spartan Incubator adapter, synthetic fixture, and adapter contract remain unchanged. One bounded user-facing successor change disables the false BOS switcher target, and the new sign-in page is a new surface; both require exact-successor CREATIVE review before release.
 
 ## Data and feature boundary
 
@@ -24,7 +24,7 @@ The service refuses to start if any credential or signing secret is absent or to
 
 1. Preserve current exact live and rollback revision `b8d8df88`; deployment `dep-dafi6d0u01pc73aihnn0`.
 2. Require exact-head CI PASS and independent technical review of the auth successor.
-3. Confirm the five approved visual files are byte-identical to `bb4c32aa4357f3745f4cc2eaa06190220a4833d8`. If any visual byte changed, return to CREATIVE review.
+3. Confirm the approved dashboard/data bytes remain identical to `bb4c32aa4357f3745f4cc2eaa06190220a4833d8` except the bounded `cc-workspace-switcher.v2.js` change that disables the false BOS target. Require exact-successor CREATIVE PASS for that disabled state and the new sign-in page.
 4. Configure the three protected environment values and a Node web-service start command `npm start`.
 5. Only after explicit release authorization, merge/deploy the exact reviewed revision.
 6. Verify public `/healthz`; unauthenticated denial of `/`, static assets, `/data/spartan-incubator.fixture.json`, and a deep link; successful sign-in; session expiry/tamper denial; logout; desktop plus 390px and 375px workflow smoke; synthetic/no-data labels; and switcher behavior.
