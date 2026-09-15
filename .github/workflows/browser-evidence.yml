@@ -75,8 +75,8 @@ jobs:
           async function login(page) {
             await page.goto(base + '/login', { waitUntil: 'domcontentloaded' });
             await Promise.all([page.waitForURL(base + '/'), page.locator('[data-testid=google-sign-in]').click()]);
-            await page.waitForSelector('.wordSwitcher button');
-            await page.waitForTimeout(500);
+            await page.waitForSelector('[data-cc-workspace="bos"][aria-disabled="true"]');
+            await page.waitForTimeout(250);
             assert(await page.locator('input[type=password]').count() === 0, 'no local password field');
           }
           (async () => {
