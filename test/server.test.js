@@ -85,11 +85,17 @@ test("sign-in surface is branded, accessible, touch-sized, and contains no local
   assert.match(body, /University of Tampa/);
   assert.match(body, /Continue with Google/);
   assert.match(body, /min-height:48px/);
+  assert.match(body, /google:focus-visible/);
+  assert.match(body, /role="status"/);
+  assert.match(body, /aria-live="polite"/);
+  assert.match(body, /aria-describedby="auth-disclosure"/);
+  assert.match(body, /Opening Google sign-in/);
   assert.doesNotMatch(body, /type="password"|name="username"/);
   const error = await fetch(`${origin}/login?error=sign-in`);
   const errorBody = await error.text();
   assert.match(errorBody, /role="alert"/);
   assert.match(errorBody, /aria-live="assertive"/);
+  assert.match(errorBody, /aria-atomic="true"/);
   assert.match(errorBody, /\.focus\(\)/);
 });
 
