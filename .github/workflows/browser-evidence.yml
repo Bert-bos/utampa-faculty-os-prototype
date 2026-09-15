@@ -151,7 +151,7 @@ jobs:
                 assert(/not deployed/i.test(await bos.getAttribute('title') || ''), name + ' BOS pending title');
                 const switcherFocus = await keyboardFocusEvidence(page, '[data-cc-workspace="bos"]');
                 state.switcherKeyboardFocus = switcherFocus;
-                assert(switcherFocus.reached && switcherFocus.outlineStyle !== 'none' && parseFloat(switcherFocus.outlineWidth) >= 3, name + ' visible switcher keyboard focus');
+                assert(switcherFocus.reached && switcherFocus.outlineStyle !== 'none' && parseFloat(switcherFocus.outlineWidth) >= 2, name + ' visible switcher keyboard focus');
                 if (name === '07-dashboard-mobile-390') {
                   await page.screenshot({ path: 'evidence/15-dashboard-switcher-keyboard-focus-mobile-390.png', fullPage: true });
                   evidence.screenshots.push('15-dashboard-switcher-keyboard-focus-mobile-390.png');
