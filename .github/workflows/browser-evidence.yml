@@ -113,6 +113,7 @@ jobs:
               for (const [name, width, height] of [['06-dashboard-desktop-1440',1440,1000],['07-dashboard-mobile-390',390,844],['08-dashboard-mobile-375',375,812]]) {
                 const page = await browser.newPage({ viewport: { width, height } });
                 await login(page);
+                await page.waitForFunction(() => /sample data|synthetic/i.test(document.body.innerText));
                 const state = await shot(page, name, 'authenticated-synthetic-oidc');
                 assert(state.geometry.scrollWidth <= state.geometry.clientWidth, name + ' overflow');
                 const bos = page.locator('[data-cc-workspace="bos"]');
@@ -120,7 +121,8 @@ jobs:
                 assert(/not deployed/i.test(await bos.getAttribute('title') || ''), name + ' BOS pending title');
                 const fixture = await page.evaluate(async () => { const r = await fetch('/data/spartan-incubator.fixture.json'); return { status: r.status, body: await r.json() }; });
                 assert(fixture.status === 200 && fixture.body.__synthetic === true, name + ' synthetic fixture');
-                assert(/sample data|synthetic/i.test(state.text), name + ' visible data provenance');
+                state.provenanceVisible = /sample data|synthetic/i.test(await page.locator('body').innerText());
+                assert(state.provenanceVisible, name + ' visible data provenance');
                 await page.close();
               }
 
