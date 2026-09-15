@@ -21,6 +21,17 @@ const CONTENT_TYPES = {
   ".woff": "font/woff",
   ".woff2": "font/woff2"
 };
+const ROOT_ASSETS = new Set([
+  "index.html",
+  "utampa-logo.svg",
+  "favicon.svg",
+  "cc-shell-responsive.v1.css",
+  "cc-recorder.css",
+  "cc-workspace-switcher.v2.js",
+  "cc-shell-shim.v1.js",
+  "cc-recorder.js",
+  "cc-incubator-adapter.v1.js"
+]);
 
 function required(name, value, minLength = 1) {
   if (typeof value !== "string" || value.length < minLength) {
@@ -165,17 +176,28 @@ function createApp(options = {}) {
 
       if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, "Method not allowed", undefined, { Allow: "GET, HEAD" });
 
-      let relative = pathname.replace(/^\/+/, "");
-      if (!relative || relative.endsWith("/")) relative += "index.html";
-      let filePath = path.resolve(rootDir, relative);
+      const relative = pathname.replace(/^\/+/, "");
+      const segments = relative.split("/").filter(Boolean);
+      const hasHiddenSegment = segments.some(segment => segment.startsWith("."));
+      const isCompiledAsset = segments[0] === "assets" && segments.length > 1;
+      const isSyntheticFixture = relative === "data/spartan-incubator.fixture.json";
+      const isRootAsset = ROOT_ASSETS.has(relative || "index.html");
+      const isDeepLink = !relative || relative.endsWith("/") || !path.posix.extname(relative);
+      const reservedMissingPath = segments[0] === "assets" || segments[0] === "data";
+
+      if (hasHiddenSegment) return send(res, 404, "Not found");
+
+      let selected;
+      if (isRootAsset) selected = relative || "index.html";
+      else if (isCompiledAsset || isSyntheticFixture) selected = relative;
+      else if (isDeepLink && !reservedMissingPath) selected = "index.html";
+      else return send(res, 404, "Not found");
+
+      const filePath = path.resolve(rootDir, selected);
       if (filePath !== rootDir && !filePath.startsWith(`${rootDir}${path.sep}`)) return send(res, 400, "Bad request");
 
       let stat;
       try { stat = await fs.promises.stat(filePath); } catch {}
-      if ((!stat || !stat.isFile()) && !path.extname(pathname)) {
-        filePath = path.join(rootDir, "index.html");
-        try { stat = await fs.promises.stat(filePath); } catch {}
-      }
       if (!stat || !stat.isFile()) return send(res, 404, "Not found");
 
       const contentType = CONTENT_TYPES[path.extname(filePath).toLowerCase()] || "application/octet-stream";
