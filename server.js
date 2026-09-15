@@ -9,6 +9,8 @@ const { URL, URLSearchParams } = require("node:url");
 const COOKIE_NAME = "utampa_session";
 const DEFAULT_TTL_MS = 8 * 60 * 60 * 1000;
 const MAX_BODY_BYTES = 8 * 1024;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 10;
 const CONTENT_TYPES = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -54,8 +56,8 @@ function sign(value, secret) {
   return crypto.createHmac("sha256", secret).update(value).digest("base64url");
 }
 
-function createSession(username, secret, expiresAt) {
-  const payload = encode(JSON.stringify({ username, expiresAt }));
+function createSession(username, secret, expiresAt, sessionId = crypto.randomBytes(16).toString("base64url")) {
+  const payload = encode(JSON.stringify({ username, expiresAt, sessionId }));
   return `${payload}.${sign(payload, secret)}`;
 }
 
@@ -114,14 +116,26 @@ function loginPage(next, error = false) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let body = "";
+    let bytes = 0;
+    let tooLarge = false;
     req.setEncoding("utf8");
     req.on("data", chunk => {
+      if (tooLarge) return;
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > MAX_BODY_BYTES) {
+        tooLarge = true;
+        reject(Object.assign(new Error("request body too large"), { status: 413 }));
+        return;
+      }
       body += chunk;
-      if (Buffer.byteLength(body) > MAX_BODY_BYTES) reject(Object.assign(new Error("request body too large"), { status: 413 }));
     });
-    req.on("end", () => resolve(body));
+    req.on("end", () => { if (!tooLarge) resolve(body); });
     req.on("error", reject);
   });
+}
+
+function tokenKey(token) {
+  return crypto.createHash("sha256").update(String(token || "")).digest("base64url");
 }
 
 function createApp(options = {}) {
@@ -132,14 +146,23 @@ function createApp(options = {}) {
   const ttlMs = options.ttlMs || DEFAULT_TTL_MS;
   const now = options.now || Date.now;
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === "production";
+  const activeSessions = new Map();
+  const loginAttempts = new Map();
 
   return http.createServer(async (req, res) => {
     try {
       const requestUrl = new URL(req.url, "http://localhost");
-      const pathname = decodeURIComponent(requestUrl.pathname);
+      let pathname;
+      try {
+        pathname = decodeURIComponent(requestUrl.pathname);
+      } catch {
+        return send(res, 400, "Bad request");
+      }
 
       if (pathname === "/healthz") {
-        return send(res, 200, JSON.stringify({ status: "ok" }), "application/json; charset=utf-8");
+        if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, "Method not allowed", undefined, { Allow: "GET, HEAD" });
+        const body = JSON.stringify({ status: "ok" });
+        return send(res, 200, req.method === "HEAD" ? "" : body, "application/json; charset=utf-8");
       }
 
       if (pathname === "/login" && req.method === "GET") {
@@ -147,18 +170,34 @@ function createApp(options = {}) {
       }
 
       if (pathname === "/login" && req.method === "POST") {
+        const attemptKey = req.socket.remoteAddress || "unknown";
+        const current = now();
+        const attempt = loginAttempts.get(attemptKey);
+        if (attempt && attempt.resetAt > current && attempt.count >= LOGIN_MAX_ATTEMPTS) {
+          return send(res, 429, "Too many sign-in attempts", undefined, { "Retry-After": String(Math.ceil((attempt.resetAt - current) / 1000)) });
+        }
         const fields = new URLSearchParams(await readBody(req));
         const next = safeNext(fields.get("next"));
         if (!safeEqual(fields.get("username") || "", username) || !safeEqual(fields.get("password") || "", password)) {
+          const fresh = !attempt || attempt.resetAt <= current;
+          loginAttempts.set(attemptKey, fresh ? { count: 1, resetAt: current + LOGIN_WINDOW_MS } : { ...attempt, count: attempt.count + 1 });
           return send(res, 401, loginPage(next, true), "text/html; charset=utf-8");
         }
-        const token = createSession(username, sessionSecret, now() + ttlMs);
-        const cookie = `${COOKIE_NAME}=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${Math.floor(ttlMs / 1000)}${secureCookies ? "; Secure" : ""}`;
+        loginAttempts.delete(attemptKey);
+        for (const [key, expiresAt] of activeSessions) {
+          if (expiresAt <= current) activeSessions.delete(key);
+        }
+        const expiresAt = current + ttlMs;
+        const token = createSession(username, sessionSecret, expiresAt);
+        activeSessions.set(tokenKey(token), expiresAt);
+        const cookie = COOKIE_NAME + "=" + token + "; HttpOnly; Path=/; SameSite=Strict; Max-Age=" + Math.floor(ttlMs / 1000) + (secureCookies ? "; Secure" : "");
         res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: next, "Set-Cookie": cookie });
         return res.end("Signed in");
       }
 
       if (pathname === "/logout") {
+        const logoutToken = parseCookies(req.headers.cookie)[COOKIE_NAME];
+        activeSessions.delete(tokenKey(logoutToken));
         res.writeHead(303, {
           ...securityHeaders("text/plain; charset=utf-8"),
           Location: "/login",
@@ -168,7 +207,10 @@ function createApp(options = {}) {
       }
 
       const token = parseCookies(req.headers.cookie)[COOKIE_NAME];
-      if (!readSession(token, username, sessionSecret, now)) {
+      const current = now();
+      const activeUntil = activeSessions.get(tokenKey(token));
+      if (!readSession(token, username, sessionSecret, now) || !Number.isFinite(activeUntil) || activeUntil <= current) {
+        activeSessions.delete(tokenKey(token));
         const next = safeNext(`${pathname}${requestUrl.search}`);
         res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: `/login?next=${encodeURIComponent(next)}` });
         return res.end("Authentication required");
@@ -183,7 +225,7 @@ function createApp(options = {}) {
       const isSyntheticFixture = relative === "data/spartan-incubator.fixture.json";
       const isRootAsset = ROOT_ASSETS.has(relative || "index.html");
       const isDeepLink = !relative || relative.endsWith("/") || !path.posix.extname(relative);
-      const reservedMissingPath = segments[0] === "assets" || segments[0] === "data";
+      const reservedMissingPath = segments[0] === "assets" || segments[0] === "data" || segments[0] === "boss";
 
       if (hasHiddenSegment) return send(res, 404, "Not found");
 
