@@ -40,26 +40,13 @@ function safeEqual(left, right) {
   return crypto.timingSafeEqual(a, b);
 }
 
-function encode(value) { return Buffer.from(value, "utf8").toString("base64url"); }
-function sign(value, secret) { return crypto.createHmac("sha256", secret).update(value).digest("base64url"); }
-function tokenKey(token) { return crypto.createHash("sha256").update(String(token || "")).digest("base64url"); }
-
-function createSession(identity, secret, expiresAt, sessionId = crypto.randomBytes(16).toString("base64url")) {
-  const payload = encode(JSON.stringify({ sub: identity.sub, email: identity.email, expiresAt, sessionId }));
-  return `${payload}.${sign(payload, secret)}`;
+function tokenKey(token, secret) {
+  return secret
+    ? crypto.createHmac("sha256", secret).update(String(token || "")).digest("base64url")
+    : crypto.createHash("sha256").update(String(token || "")).digest("base64url");
 }
 
-function readSession(token, allowedEmail, secret, now) {
-  if (!token || !token.includes(".")) return false;
-  const [payload, suppliedSignature, ...extra] = token.split(".");
-  if (extra.length || !safeEqual(sign(payload, secret), suppliedSignature)) return false;
-  try {
-    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return typeof parsed.sub === "string" && parsed.sub.length > 0 &&
-      typeof parsed.email === "string" && parsed.email.toLowerCase() === allowedEmail.toLowerCase() &&
-      Number.isFinite(parsed.expiresAt) && parsed.expiresAt > now();
-  } catch { return false; }
-}
+function createSession() { return crypto.randomBytes(32).toString("base64url"); }
 
 function parseCookies(header = "") {
   const cookies = {};
@@ -84,8 +71,8 @@ function safeNext(value) {
       candidate = decoded;
     }
     const parsed = new URL(candidate, "https://utampa.invalid");
-    if (parsed.origin !== "https://utampa.invalid" || !candidate.startsWith("/") || candidate.startsWith("//")) return "/";
-    if (/^\/(?:login|logout|auth|__test)(?:\/|\?|$)/i.test(candidate)) return "/";
+    if (parsed.origin !== "https://utampa.invalid" || !candidate.startsWith("/") || candidate.startsWith("//") || parsed.pathname.startsWith("//")) return "/";
+    if (/^\/(?:login|logout|auth|__test)(?:\/|$)/i.test(parsed.pathname)) return "/";
     return `${parsed.pathname}${parsed.search}${parsed.hash}`;
   } catch { return "/"; }
 }
@@ -195,7 +182,7 @@ function createApp(options = {}) {
   const authAttempts = new Map();
 
   function clean(current) {
-    for (const [key, expiresAt] of activeSessions) if (expiresAt <= current) activeSessions.delete(key);
+    for (const [key, session] of activeSessions) if (session.expiresAt <= current) activeSessions.delete(key);
     for (const [key, transaction] of pendingAuth) if (transaction.expiresAt <= current) pendingAuth.delete(key);
     for (const [key, attempt] of authAttempts) if (attempt.resetAt <= current) authAttempts.delete(key);
   }
@@ -266,8 +253,8 @@ function createApp(options = {}) {
         }
         authAttempts.delete(req.socket.remoteAddress || "unknown");
         const expiresAt = current + ttlMs;
-        const token = createSession(identity, sessionSecret, expiresAt);
-        activeSessions.set(tokenKey(token), expiresAt);
+        const token = createSession();
+        activeSessions.set(tokenKey(token, sessionSecret), { sub: identity.sub, email: identity.email, expiresAt });
         const sessionCookie = `${COOKIE_NAME}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(ttlMs / 1000)}${secureCookies ? "; Secure" : ""}`;
         res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: transaction.next, "Set-Cookie": [clearTransaction, sessionCookie] });
         return res.end("Signed in");
@@ -276,16 +263,17 @@ function createApp(options = {}) {
       if (pathname === "/logout") {
         if (req.method !== "POST") return send(res, 405, "Method not allowed", undefined, { Allow: "POST" });
         const logoutToken = parseCookies(req.headers.cookie)[COOKIE_NAME];
-        activeSessions.delete(tokenKey(logoutToken));
+        activeSessions.delete(tokenKey(logoutToken, sessionSecret));
         res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: "/login", "Set-Cookie": `${COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secureCookies ? "; Secure" : ""}` });
         return res.end("Signed out");
       }
 
       const token = parseCookies(req.headers.cookie)[COOKIE_NAME];
       const current = now();
-      const activeUntil = activeSessions.get(tokenKey(token));
-      if (!readSession(token, allowedEmail, sessionSecret, now) || !Number.isFinite(activeUntil) || activeUntil <= current) {
-        activeSessions.delete(tokenKey(token));
+      const sessionKey = tokenKey(token, sessionSecret);
+      const session = activeSessions.get(sessionKey);
+      if (!session || session.expiresAt <= current || !safeEqual(String(session.email).toLowerCase(), allowedEmail.toLowerCase()) || typeof session.sub !== "string" || !session.sub) {
+        activeSessions.delete(sessionKey);
         const next = safeNext(`${pathname}${requestUrl.search}`);
         res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: `/login?next=${encodeURIComponent(next)}` });
         return res.end("Authentication required");
@@ -325,4 +313,4 @@ if (require.main === module) {
   createApp().listen(port, "0.0.0.0", () => console.log(`UTampa Faculty OS listening on ${port}`));
 }
 
-module.exports = { COOKIE_NAME, TRANSACTION_COOKIE, createApp, createGoogleOAuthProvider, createSession, readSession, safeNext, signInPage };
+module.exports = { COOKIE_NAME, TRANSACTION_COOKIE, createApp, createGoogleOAuthProvider, createSession, safeNext, signInPage };

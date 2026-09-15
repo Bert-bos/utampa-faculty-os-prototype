@@ -114,7 +114,7 @@
       var chip = document.createElement("button");
       chip.type = "button";
       chip.className = "ccIncubatorMediaChip";
-      chip.style.cssText = "font-size:12px;padding:4px 8px;border-radius:999px;" +
+      chip.style.cssText = "font-size:12px;min-height:44px;padding:8px 12px;border-radius:999px;" +
         "border:1px solid currentColor;background:transparent;cursor:pointer;margin-right:6px;";
       chip.appendChild(document.createTextNode(
         "Press/founder-story review: " + flag.type + " -- " + flag.relatedTo

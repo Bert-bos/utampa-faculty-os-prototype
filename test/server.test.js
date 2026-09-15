@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 const { createApp, createGoogleOAuthProvider } = require("../server");
 
 const CLIENT_ID = "synthetic-client-id.apps.googleusercontent.com";
@@ -119,6 +120,10 @@ test("callback is one-time, state-bound, email-allowlisted, and rejects provider
     assert.equal(response.headers.get("location"), "/login?error=sign-in");
     assert.doesNotMatch(await response.text(), /someone|access_denied|valid-code/i);
   }
+  const fresh = await begin(origin);
+  const wrongEmail = await fetch(`${origin}/auth/google/callback?state=${fresh.state}&code=valid-code`, { headers: { Cookie: fresh.transactionCookie }, redirect: "manual" });
+  assert.equal(wrongEmail.headers.get("location"), "/login?error=sign-in");
+  assert.equal(firstCookie(wrongEmail, "utampa_session"), undefined);
 });
 
 test("verified allowlisted identity creates an opaque revocable session and preserves safe deep links", async t => {
@@ -138,7 +143,7 @@ test("verified allowlisted identity creates an opaque revocable session and pres
   const externalLocation = new URL(external.headers.get("location"));
   const externalCallback = await fetch(`${origin}/auth/google/callback?state=${externalLocation.searchParams.get("state")}&code=valid-code`, { headers: { Cookie: firstCookie(external, "utampa_oauth_tx") }, redirect: "manual" });
   assert.equal(externalCallback.headers.get("location"), "/");
-  for (const maliciousNext of ["/\\evil.example", "/%5cevil.example", "/%255cevil.example", "/%2f%2fevil.example", "/logout", "/auth/google"]) {
+  for (const maliciousNext of ["/\\evil.example", "/%5cevil.example", "/%255cevil.example", "/%2f%2fevil.example", "/a/..//evil.example", "/logout", "/auth/google"]) {
     const attempt = await fetch(`${origin}/auth/google?next=${encodeURIComponent(maliciousNext)}`, { redirect: "manual" });
     const attemptLocation = new URL(attempt.headers.get("location"));
     const callback = await fetch(`${origin}/auth/google/callback?state=${attemptLocation.searchParams.get("state")}&code=valid-code`, { headers: { Cookie: firstCookie(attempt, "utampa_oauth_tx") }, redirect: "manual" });
@@ -240,4 +245,9 @@ test("repository data contract stays synthetic and unknown is never coerced to z
   assert.match(adapter, /submissionsIsArray \? rawSubmissions\.length : null/);
   assert.match(adapter, /recruitingIsArray[\s\S]*: "no data"/);
   assert.doesNotMatch(adapter, /weeklySubmissions\s*\|\|\s*\[\]/);
+  const context = { window: {}, document: { readyState: "loading", addEventListener() {} }, console };
+  vm.runInNewContext(adapter, context);
+  assert.equal(context.window.__ccIncubatorAdapterV1.formatCount(null), "no data");
+  assert.equal(context.window.__ccIncubatorAdapterV1.formatCount(undefined), "no data");
+  assert.equal(context.window.__ccIncubatorAdapterV1.formatCount(0), "0");
 });

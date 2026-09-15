@@ -7,6 +7,7 @@ on:
       - 'server.js'
       - 'test/server.test.js'
       - 'cc-workspace-switcher.v2.js'
+      - 'cc-incubator-adapter.v1.js'
       - 'index.html'
       - 'assets/**'
       - 'data/**'
@@ -72,9 +73,9 @@ jobs:
             evidence.checks[name] = { authState, url: page.url(), title: await page.title(), text: (await page.locator('body').innerText()).slice(0, 1800), geometry };
             return evidence.checks[name];
           }
-          async function login(page) {
-            await page.goto(base + '/login', { waitUntil: 'domcontentloaded' });
-            await Promise.all([page.waitForURL(base + '/'), page.locator('[data-testid=google-sign-in]').click()]);
+          async function login(page, next = '/') {
+            await page.goto(base + '/login?next=' + encodeURIComponent(next), { waitUntil: 'domcontentloaded' });
+            await Promise.all([page.waitForURL(base + next), page.locator('[data-testid=google-sign-in]').click()]);
             await page.waitForSelector('[data-cc-workspace="bos"][aria-disabled="true"]');
             await page.waitForTimeout(250);
             assert(await page.locator('input[type=password]').count() === 0, 'no local password field');
@@ -144,6 +145,37 @@ jobs:
               assert(/\/login\?next=/.test(replayState.url), 'revoked session replay redirected');
               assert(!/Spartan Incubator Service/i.test(replayState.text), 'revoked session disclosed no dashboard');
               await replay.close();
+
+              const service = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              await login(service, '/service/spartan-incubator');
+              await service.waitForSelector('.ccIncubatorMediaChip');
+              const mediaChip = service.locator('.ccIncubatorMediaChip').first();
+              assert(await mediaChip.evaluate(node => node.getBoundingClientRect().height) >= 44, 'Service media review touch target');
+              await mediaChip.click();
+              assert(await mediaChip.getAttribute('aria-expanded') === 'true', 'Service media review expanded');
+              const serviceState = await shot(service, '11-service-deep-link-media-review', 'authenticated-service-workflow');
+              serviceState.reviewPanelVisible = /Status:/.test(await service.locator('body').innerText());
+              assert(serviceState.reviewPanelVisible, 'Service review panel content');
+              await service.close();
+
+              const noData = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              await noData.route('**/data/spartan-incubator.fixture.json', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ __synthetic: true, meta: { sourceLabel: 'Synthetic no-data test' } }) }));
+              await login(noData);
+              await noData.waitForFunction(() => document.body.innerText.includes('Submissions: no data'));
+              const noDataState = await shot(noData, '12-no-data-not-zero', 'authenticated-synthetic-no-data');
+              noDataState.noDataVisible = (await noData.locator('body').innerText()).includes('Submissions: no data');
+              assert(noDataState.noDataVisible, 'missing submissions shown as no data');
+              await noData.close();
+
+              const verifiedZero = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              await verifiedZero.route('**/data/spartan-incubator.fixture.json', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ __synthetic: true, meta: { sourceLabel: 'Synthetic verified-zero test' }, weeklySubmissions: [], commitments: [], wins: [], needs: [], recruiting: [], mediaFlags: [] }) }));
+              await login(verifiedZero);
+              await verifiedZero.waitForFunction(() => document.body.innerText.includes('Submissions: 0'));
+              const zeroState = await shot(verifiedZero, '13-verified-empty-is-zero', 'authenticated-synthetic-verified-zero');
+              const zeroText = await verifiedZero.locator('body').innerText();
+              zeroState.verifiedZeroVisible = zeroText.includes('Submissions: 0') && zeroText.includes('Recruiting verified: 0/0');
+              assert(zeroState.verifiedZeroVisible, 'verified empty arrays shown as zero');
+              await verifiedZero.close();
 
               evidence.verdict = evidence.failures.length ? 'FAIL' : 'PASS';
               fs.writeFileSync('evidence/evidence.json', JSON.stringify(evidence, null, 2));

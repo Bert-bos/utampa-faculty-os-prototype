@@ -7,7 +7,7 @@ This repository owns a standalone, server-enforced Google identity boundary arou
 - The committed Spartan Incubator file is synthetic demonstration data, not live University, student, founder, or FERPA data.
 - Missing/non-array collections display `no data`; only a verified explicit empty collection may display zero.
 - Dashboard cards and controls retain prototype behavior. They are not represented as live University system integrations.
-- The sign-in surface uses Google OIDC. The application stores only the allowlisted identity subject/email in its own opaque session and discards provider tokens after verification.
+- The sign-in surface uses Google OIDC. The browser receives only a random opaque session token; the process-local session record retains the allowlisted subject/email and provider tokens are discarded after verification.
 
 ## Required protected configuration
 
