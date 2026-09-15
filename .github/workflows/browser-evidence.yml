@@ -73,6 +73,20 @@ jobs:
             evidence.checks[name] = { authState, url: page.url(), title: await page.title(), text: (await page.locator('body').innerText()).slice(0, 1800), geometry };
             return evidence.checks[name];
           }
+          async function keyboardFocusEvidence(page, selector, maxTabs = 40) {
+            await page.evaluate(() => { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); });
+            for (let index = 0; index < maxTabs; index += 1) {
+              await page.keyboard.press('Tab');
+              const result = await page.evaluate(target => {
+                const active = document.activeElement;
+                if (!active || !active.matches(target)) return null;
+                const style = getComputedStyle(active);
+                return { reached: true, tag: active.tagName, text: (active.textContent || '').trim(), outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth, outlineColor: style.outlineColor };
+              }, selector);
+              if (result) return result;
+            }
+            return { reached: false };
+          }
           async function login(page, next = '/') {
             await page.goto(base + '/login?next=' + encodeURIComponent(next), { waitUntil: 'domcontentloaded' });
             await Promise.all([page.waitForURL(base + next), page.locator('[data-testid=google-sign-in]').click()]);
@@ -92,6 +106,18 @@ jobs:
                 assert(state.geometry.scrollWidth <= state.geometry.clientWidth, name + ' overflow');
                 const buttonHeight = await page.locator('[data-testid=google-sign-in]').evaluate(node => node.getBoundingClientRect().height);
                 assert(buttonHeight >= 44, name + ' touch target');
+                const focusEvidence = await keyboardFocusEvidence(page, '[data-testid=google-sign-in]');
+                state.googleKeyboardFocus = focusEvidence;
+                assert(focusEvidence.reached && focusEvidence.outlineStyle !== 'none' && parseFloat(focusEvidence.outlineWidth) >= 3, name + ' visible Google keyboard focus');
+                if (name === '02-login-mobile-390') {
+                  await page.screenshot({ path: 'evidence/14-login-keyboard-focus-mobile-390.png', fullPage: true });
+                  evidence.screenshots.push('14-login-keyboard-focus-mobile-390.png');
+                }
+                await page.evaluate(() => document.querySelector('[data-testid=google-sign-in]').addEventListener('click', event => event.preventDefault(), { capture: true, once: true }));
+                await page.locator('[data-testid=google-sign-in]').click();
+                const loadingEvidence = await page.locator('#auth-status').evaluate(node => ({ text: node.textContent, role: node.getAttribute('role'), live: node.getAttribute('aria-live'), atomic: node.getAttribute('aria-atomic') }));
+                state.assistiveLoading = loadingEvidence;
+                assert(/opening google sign-in/i.test(loadingEvidence.text || '') && loadingEvidence.role === 'status' && loadingEvidence.live === 'polite' && loadingEvidence.atomic === 'true', name + ' assistive loading announcement');
                 await page.close();
               }
 
@@ -101,6 +127,9 @@ jobs:
               const errorState = await shot(error, '04-oauth-error-mobile-390', 'oauth-error-local-only');
               assert(/could not complete sign-in/i.test(errorState.text), 'safe OAuth error message');
               assert(await error.locator('[role=alert]').evaluate(node => document.activeElement === node), 'error focus');
+              const errorAnnouncement = await error.locator('[role=alert]').evaluate(node => ({ role: node.getAttribute('role'), live: node.getAttribute('aria-live'), atomic: node.getAttribute('aria-atomic'), focused: document.activeElement === node }));
+              errorState.assistiveError = errorAnnouncement;
+              assert(errorAnnouncement.role === 'alert' && errorAnnouncement.live === 'assertive' && errorAnnouncement.atomic === 'true' && errorAnnouncement.focused, 'assistive OAuth error announcement and focus return');
               assert(errorState.geometry.scrollWidth <= errorState.geometry.clientWidth, 'error overflow');
               await error.close();
 
@@ -120,6 +149,13 @@ jobs:
                 const bos = page.locator('[data-cc-workspace="bos"]');
                 assert(await bos.getAttribute('aria-disabled') === 'true', name + ' BOS disabled');
                 assert(/not deployed/i.test(await bos.getAttribute('title') || ''), name + ' BOS pending title');
+                const switcherFocus = await keyboardFocusEvidence(page, '[data-cc-workspace="bos"]');
+                state.switcherKeyboardFocus = switcherFocus;
+                assert(switcherFocus.reached && switcherFocus.outlineStyle !== 'none' && parseFloat(switcherFocus.outlineWidth) >= 3, name + ' visible switcher keyboard focus');
+                if (name === '07-dashboard-mobile-390') {
+                  await page.screenshot({ path: 'evidence/15-dashboard-switcher-keyboard-focus-mobile-390.png', fullPage: true });
+                  evidence.screenshots.push('15-dashboard-switcher-keyboard-focus-mobile-390.png');
+                }
                 const fixture = await page.evaluate(async () => { const r = await fetch('/data/spartan-incubator.fixture.json'); return { status: r.status, body: await r.json() }; });
                 assert(fixture.status === 200 && fixture.body.__synthetic === true, name + ' synthetic fixture');
                 state.provenanceVisible = /sample data|synthetic/i.test(await page.locator('body').innerText());
