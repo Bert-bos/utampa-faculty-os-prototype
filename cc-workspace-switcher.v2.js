@@ -33,7 +33,7 @@
     { key: 'utampa', match: /^u\s*tampa|faculty\s*os/i,
       url: 'https://utampa-faculty-os-prototype.onrender.com/' },
     { key: 'bos',    match: /^bos\b|^boss\b/i,
-      url: 'https://utampa-faculty-os-prototype.onrender.com/boss/' },
+      url: null },
     { key: 'ep',     match: /entrepreneurship\s*professor/i,
       url: 'https://entrepreneurship-professor-prototype.onrender.com/' }
   ];
@@ -132,11 +132,22 @@
   }
 
   function boot() {
-    if (wire()) return;
+    wire();
     var tries = 0;
     var t = setInterval(function () {
       if (wire() || ++tries > 20) clearInterval(t);
     }, 150);
+
+    /* The exported VINEXT page can hydrate after this script has wired the
+       server-rendered header. Re-run against replacement nodes so the disabled
+       sibling state cannot disappear because of load timing. */
+    if (window.MutationObserver && document.body) {
+      var observer = new MutationObserver(function (records) {
+        var changed = records.some(function (record) { return record.addedNodes.length > 0; });
+        if (changed) wire();
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
   }
 
   if (document.readyState === 'loading') {

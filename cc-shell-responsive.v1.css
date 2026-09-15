@@ -1,4 +1,4 @@
-/* ==========================================================================
+/* ===========================================================================
    cc-shell-responsive.v1.css
    Claude lane — shared application-shell responsive corrections.
    Return ID: CC-20260905-FIX-033   Built + verified 2026-09-05T05:00Z
@@ -118,4 +118,27 @@
 button.globalRecord:focus-visible {
   outline: 2px solid currentColor;
   outline-offset: 2px;
+}
+
+/* ---- UTAMPA-NEXT-05: Today directive must not widen mobile viewport ------
+   The compiled Today card keeps .directiveActions at min-width:max-content.
+   At 390/375px that forced the document to 460px even though the Incubator
+   additions themselves fit. Stack the directive on small screens and allow
+   its two actions to wrap within the committed viewport. */
+@media (max-width: 720px) {
+  .briefing.todayDirective {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .briefing.todayDirective .directiveActions {
+    width: 100%;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .briefing.todayDirective .directiveActions button {
+    flex: 1 1 140px;
+    white-space: normal;
+  }
 }
