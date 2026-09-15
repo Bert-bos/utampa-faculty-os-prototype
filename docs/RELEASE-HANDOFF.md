@@ -1,33 +1,40 @@
 # UTampa Faculty OS release handoff
 
-This repository now owns a self-contained, server-enforced authentication boundary around the static UTampa dashboard. The approved dashboard HTML, responsive CSS, Spartan Incubator adapter, synthetic fixture, and adapter contract remain unchanged. One bounded user-facing successor change disables the false BOS switcher target, and the new sign-in page is a new surface; both require exact-successor CREATIVE review before release.
+This repository owns a standalone, server-enforced Google identity boundary around the UTampa dashboard. It does not require the BOS or Entrepreneurship Professor runtime to authenticate or serve UTampa. BOS and EP remain optional navigation destinations and may be older or unavailable.
 
 ## Data and feature boundary
 
 - The committed Spartan Incubator file is synthetic demonstration data, not live University, student, founder, or FERPA data.
-- Missing/non-array collections display `no data`; an explicit empty collection may display zero.
-- Dashboard cards and controls retain their prototype behavior. They are not represented as live University system integrations.
-- The dashboard is served independently. BOS and Entrepreneurship Professor may remain on older releases or be unavailable without blocking the UTampa root, assets, data adapter, or deep links.
+- Missing/non-array collections display `no data`; only a verified explicit empty collection may display zero.
+- Dashboard cards and controls retain prototype behavior. They are not represented as live University system integrations.
+- The sign-in surface uses Google OIDC. The application stores only the allowlisted identity subject/email in its own opaque session and discards provider tokens after verification.
 
 ## Required protected configuration
 
 Set these values in the deployment provider; never commit their values:
 
-- `UTAMPA_USERNAME`
-- `UTAMPA_PASSWORD` (minimum 12 characters)
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET` (minimum 12 characters)
+- `GOOGLE_REDIRECT_URI` (the exact HTTPS callback URL ending in `/auth/google/callback`)
+- `UTAMPA_ALLOWED_EMAIL` (Bert's exact authorized University Google account)
 - `UTAMPA_SESSION_SECRET` (minimum 32 characters, randomly generated)
 - `NODE_ENV=production`
 
-The service refuses to start if any credential or signing secret is absent or too short. `/healthz` is the only public route. Every dashboard, script, stylesheet, fixture-data, and deep-link request defaults to the sign-in boundary.
+Production uses Google's fixed authorization, token, and JWKS endpoints; `openid email` are the only scopes. The application enforces state, nonce, Authorization Code + PKCE, RS256 signature, issuer, audience/authorized-party, expiry, `email_verified`, exact email allowlisting, and immutable `sub`. A synthetic provider exists only when both `NODE_ENV=test` and `UTAMPA_SYNTHETIC_OIDC=1`; never set that flag in a deployed environment.
+
+The service refuses to start if any required configuration is absent or too short. `/healthz`, `/login`, and the OAuth handshake are the only public surfaces. Dashboard, scripts, stylesheets, fixture data, and deep links default deny.
 
 ## Release gates
 
-1. Preserve current exact live and rollback revision `b8d8df88`; deployment `dep-dafi6d0u01pc73aihnn0`.
-2. Require exact-head CI PASS and independent technical review of the auth successor.
-3. Confirm the approved dashboard/data bytes remain identical to `bb4c32aa4357f3745f4cc2eaa06190220a4833d8` except the bounded `cc-workspace-switcher.v2.js` change that disables the false BOS target. Require exact-successor CREATIVE PASS for that disabled state and the new sign-in page.
-4. Configure the three protected environment values and a Node web-service start command `npm start`.
-5. Only after explicit release authorization, merge/deploy the exact reviewed revision.
-6. Verify public `/healthz`; unauthenticated denial of `/`, static assets, `/data/spartan-incubator.fixture.json`, and a deep link; successful sign-in; session expiry/tamper denial; logout; desktop plus 390px and 375px workflow smoke; synthetic/no-data labels; and switcher behavior.
-7. Record the exact provider deployment ID and commit. Roll back to `b8d8df88` if any gate fails.
+1. Preserve current live/rollback revision `b8d8df88`; deployment `dep-dafi6d0u01pc73aihnn0`.
+2. Require exact-head CI PASS, exact synthetic OAuth browser evidence, and independent technical/security PASS.
+3. Require exact-successor CREATIVE PASS for the branded Google sign-in/error surface and disabled BOS switcher state.
+4. Freeze the current static site's auto-deploy before merge. Provision a distinct single-instance Node web service with auto-deploy off and `npm start`; the current static runtime cannot enforce authentication.
+5. Configure the five protected environment values. Confirm the Google OAuth client allows only the exact production redirect URI and authorized University account. Do not expose secrets in logs or evidence.
+6. Only after explicit protected release authorization, deploy the exact reviewed revision.
+7. Verify exact deployment identity; public `/healthz`; unauthenticated denial of root/assets/data/deep links; successful Google sign-in; wrong-account/default-deny behavior; session expiry/tamper denial; POST logout and replay denial; desktop, 390px, and 375px Service/Spartan workflow; synthetic/no-data labels; and fail-safe sibling navigation.
+8. Record the provider deployment ID and commit. Roll back by routing to the preserved `b8d8df88` static service if any gate fails.
 
-No merge, deployment, provider mutation, secret creation, or real-data introduction is authorized by this handoff.
+Sessions, pending OAuth transactions, and initiation throttling are process-local. The governed release therefore requires exactly one Node instance. A restart requires reauthentication but must not disclose data.
+
+No merge, deployment, provider mutation, secret creation, spending, or real-data introduction is authorized by this handoff.

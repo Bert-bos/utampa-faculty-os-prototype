@@ -23,9 +23,12 @@ jobs:
       RC_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       NODE_ENV: test
       PORT: 4175
-      UTAMPA_USERNAME: evidence-user
-      UTAMPA_PASSWORD: synthetic-evidence-password
+      GOOGLE_CLIENT_ID: synthetic-client-id.apps.googleusercontent.com
+      GOOGLE_CLIENT_SECRET: synthetic-evidence-client-secret
+      GOOGLE_REDIRECT_URI: http://127.0.0.1:4175/auth/google/callback
+      UTAMPA_ALLOWED_EMAIL: bert@utampa.edu
       UTAMPA_SESSION_SECRET: synthetic-evidence-session-secret-32-chars
+      UTAMPA_SYNTHETIC_OIDC: '1'
     steps:
       - name: Checkout exact PR head
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -60,35 +63,21 @@ jobs:
           const fs = require('fs');
           const { chromium } = require('playwright-core');
           const base = 'http://127.0.0.1:4175';
-          const evidence = { exactHead: process.env.RC_SHA, data: 'repository synthetic fixture only; no real/private/FERPA/student/founder data', screenshots: [], checks: {}, failures: [] };
+          const evidence = { exactHead: process.env.RC_SHA, identity: 'injected synthetic Google OIDC; no real account or token', data: 'repository synthetic fixture only; no real/private/FERPA/student/founder data', screenshots: [], checks: {}, failures: [] };
           const assert = (ok, message) => { if (!ok) evidence.failures.push(message); };
-          async function shot(page, name) {
+          async function shot(page, name, authState) {
             await page.screenshot({ path: 'evidence/' + name + '.png', fullPage: true });
             evidence.screenshots.push(name + '.png');
             const geometry = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
-            evidence.checks[name] = { url: page.url(), title: await page.title(), text: (await page.locator('body').innerText()).slice(0, 1800), geometry };
+            evidence.checks[name] = { authState, url: page.url(), title: await page.title(), text: (await page.locator('body').innerText()).slice(0, 1800), geometry };
             return evidence.checks[name];
           }
           async function login(page) {
-            const diagnostics = [];
-            page.on('console', message => diagnostics.push('console:' + message.type() + ':' + message.text()));
-            page.on('pageerror', error => diagnostics.push('pageerror:' + String(error)));
-            page.on('requestfailed', request => diagnostics.push('requestfailed:' + request.url() + ':' + (request.failure() && request.failure().errorText)));
-            page.on('response', response => { if (response.url().includes('cc-workspace-switcher')) diagnostics.push('response:' + response.status() + ':' + response.url()); });
             await page.goto(base + '/login', { waitUntil: 'domcontentloaded' });
-            await page.locator('input[name=username]').fill('evidence-user');
-            await page.locator('input[name=password]').fill('synthetic-evidence-password');
-            await Promise.all([page.waitForURL(base + '/'), page.locator('button[type=submit]').click()]);
+            await Promise.all([page.waitForURL(base + '/'), page.locator('[data-testid=google-sign-in]').click()]);
             await page.waitForSelector('.wordSwitcher button');
-            await page.waitForTimeout(1000);
-            if (await page.locator('[data-cc-workspace="bos"]').count() !== 1) {
-              const scriptState = await page.evaluate(async () => {
-                const response = await fetch('/cc-workspace-switcher.v2.js');
-                return { status: response.status, text: (await response.text()).slice(0, 120) };
-              });
-              const domState = await page.evaluate(() => ({ marker: window.__ccWorkspaceSwitcherWired, scripts: Array.from(document.scripts).map(s => s.src || '[inline]').slice(-12), tail: document.documentElement.outerHTML.slice(-1200) }));
-              throw new Error('switcher did not wire: ' + JSON.stringify({ url: page.url(), scriptState, domState, diagnostics }));
-            }
+            await page.waitForTimeout(500);
+            assert(await page.locator('input[type=password]').count() === 0, 'no local password field');
           }
           (async () => {
             const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_BIN, args: ['--no-sandbox'] });
@@ -96,34 +85,40 @@ jobs:
               for (const [name, width, height] of [['01-login-desktop-1440',1440,1000],['02-login-mobile-390',390,844],['03-login-mobile-375',375,812]]) {
                 const page = await browser.newPage({ viewport: { width, height } });
                 await page.goto(base + '/login', { waitUntil: 'domcontentloaded' });
-                const state = await shot(page, name);
+                const state = await shot(page, name, 'unauthenticated-entry');
+                assert(/continue with google/i.test(state.text), name + ' Google identity entry');
                 assert(/synthetic demonstration data only/i.test(state.text), name + ' provenance label');
                 assert(state.geometry.scrollWidth <= state.geometry.clientWidth, name + ' overflow');
+                const buttonHeight = await page.locator('[data-testid=google-sign-in]').evaluate(node => node.getBoundingClientRect().height);
+                assert(buttonHeight >= 44, name + ' touch target');
                 await page.close();
               }
 
-              const invalid = await browser.newPage({ viewport: { width: 390, height: 844 } });
-              await invalid.goto(base + '/login');
-              await invalid.locator('input[name=username]').fill('evidence-user');
-              await invalid.locator('input[name=password]').fill('wrong-password');
-              await invalid.locator('button[type=submit]').click();
-              await invalid.waitForSelector('[role=alert]');
-              const invalidState = await shot(invalid, '04-invalid-login-mobile-390');
-              assert(/sign-in failed/i.test(invalidState.text), 'invalid login message');
-              await invalid.close();
+              const error = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              await error.goto(base + '/login?error=sign-in');
+              await error.waitForSelector('[role=alert]');
+              const errorState = await shot(error, '04-oauth-error-mobile-390', 'oauth-error-local-only');
+              assert(/could not complete sign-in/i.test(errorState.text), 'safe OAuth error message');
+              assert(await error.locator('[role=alert]').evaluate(node => document.activeElement === node), 'error focus');
+              assert(errorState.geometry.scrollWidth <= errorState.geometry.clientWidth, 'error overflow');
+              await error.close();
 
-              for (const [name, width, height] of [['05-dashboard-desktop-1440',1440,1000],['06-dashboard-mobile-390',390,844],['07-dashboard-mobile-375',375,812]]) {
+              const denied = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              await denied.goto(base + '/service/spartan-incubator', { waitUntil: 'domcontentloaded' });
+              const deniedState = await shot(denied, '05-unauthenticated-deep-link-denied', 'unauthenticated-denied');
+              assert(/\/login\?next=/.test(deniedState.url), 'unauthenticated deep link redirected');
+              assert(!/Spartan Incubator Service/i.test(deniedState.text), 'private dashboard not disclosed');
+              await denied.close();
+
+              for (const [name, width, height] of [['06-dashboard-desktop-1440',1440,1000],['07-dashboard-mobile-390',390,844],['08-dashboard-mobile-375',375,812]]) {
                 const page = await browser.newPage({ viewport: { width, height } });
                 await login(page);
-                const state = await shot(page, name);
+                const state = await shot(page, name, 'authenticated-synthetic-oidc');
                 assert(state.geometry.scrollWidth <= state.geometry.clientWidth, name + ' overflow');
                 const bos = page.locator('[data-cc-workspace="bos"]');
                 assert(await bos.getAttribute('aria-disabled') === 'true', name + ' BOS disabled');
                 assert(/not deployed/i.test(await bos.getAttribute('title') || ''), name + ' BOS pending title');
-                const fixture = await page.evaluate(async () => {
-                  const r = await fetch('/data/spartan-incubator.fixture.json');
-                  return { status: r.status, body: await r.json() };
-                });
+                const fixture = await page.evaluate(async () => { const r = await fetch('/data/spartan-incubator.fixture.json'); return { status: r.status, body: await r.json() }; });
                 assert(fixture.status === 200 && fixture.body.__synthetic === true, name + ' synthetic fixture');
                 assert(/sample data|synthetic/i.test(state.text), name + ' visible data provenance');
                 await page.close();
@@ -132,16 +127,26 @@ jobs:
               const failSafe = await browser.newPage({ viewport: { width: 390, height: 844 } });
               await login(failSafe);
               const response = await failSafe.goto(base + '/boss/', { waitUntil: 'domcontentloaded' });
-              const failState = await shot(failSafe, '08-bos-direct-link-fail-safe-404');
+              const failState = await shot(failSafe, '09-bos-direct-link-fail-safe-404', 'authenticated-sibling-denied');
               assert(response.status() === 404 && /not found/i.test(failState.text), 'BOS direct route fail safe');
               await failSafe.close();
+
+              const replay = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              await login(replay);
+              const oldCookie = (await replay.context().cookies()).find(cookie => cookie.name === 'utampa_session');
+              assert(Boolean(oldCookie), 'session cookie exists before logout');
+              await replay.evaluate(async () => { await fetch('/logout', { method: 'POST' }); });
+              await replay.context().addCookies([oldCookie]);
+              await replay.goto(base + '/', { waitUntil: 'domcontentloaded' });
+              const replayState = await shot(replay, '10-logout-replay-denied', 'logged-out-replay-denied');
+              assert(/\/login\?next=/.test(replayState.url), 'revoked session replay redirected');
+              assert(!/Spartan Incubator Service/i.test(replayState.text), 'revoked session disclosed no dashboard');
+              await replay.close();
 
               evidence.verdict = evidence.failures.length ? 'FAIL' : 'PASS';
               fs.writeFileSync('evidence/evidence.json', JSON.stringify(evidence, null, 2));
               if (evidence.failures.length) process.exitCode = 1;
-            } finally {
-              await browser.close();
-            }
+            } finally { await browser.close(); }
           })().catch(error => { evidence.verdict = 'ERROR'; evidence.fatal = String(error.stack || error); fs.writeFileSync('evidence/evidence.json', JSON.stringify(evidence, null, 2)); console.error(error); process.exit(1); });
           NODE
           node evidence.cjs
@@ -156,6 +161,7 @@ jobs:
             echo "UTAMPA_EXACT_BROWSER_EVIDENCE_READY"
             echo "EXACT_HEAD=$RC_SHA"
             echo "RUN_URL=https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "IDENTITY=injected synthetic Google OIDC; no real account or token"
             echo "DATA=repository synthetic fixture only; no real/private/FERPA/student/founder data"
           } > evidence/MANIFEST.txt
           find evidence -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > evidence/SHA256SUMS.txt

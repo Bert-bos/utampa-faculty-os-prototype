@@ -1,51 +1,150 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { createApp } = require("../server");
+const { createApp, createGoogleOAuthProvider } = require("../server");
 
-const USERNAME = "bert";
-const PASSWORD = "correct-horse-battery-staple";
+const CLIENT_ID = "synthetic-client-id.apps.googleusercontent.com";
+const CLIENT_SECRET = "synthetic-client-secret";
+const REDIRECT_URI = "https://utampa.example/auth/google/callback";
+const ALLOWED_EMAIL = "bert@utampa.edu";
 const SECRET = "0123456789abcdef0123456789abcdef";
 
+function fakeOAuth(identity = { sub: "google-subject-123", email: ALLOWED_EMAIL }) {
+  const calls = [];
+  return {
+    calls,
+    authorizationUrl(values) {
+      calls.push({ type: "authorize", ...values });
+      return `https://identity.test/authorize?state=${encodeURIComponent(values.state)}&nonce=${encodeURIComponent(values.nonce)}&code_challenge=${encodeURIComponent(values.codeChallenge)}&scope=openid%20email`;
+    },
+    async exchangeAndVerify(values) {
+      calls.push({ type: "exchange", ...values });
+      if (values.code !== "valid-code") throw new Error("bad code");
+      return identity;
+    }
+  };
+}
+
 async function fixture(t, options = {}) {
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "utampa-server-"));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "utampa-oauth-"));
   fs.writeFileSync(path.join(rootDir, "index.html"), "<h1>PRIVATE DASHBOARD MARKER</h1>");
   fs.mkdirSync(path.join(rootDir, "data"));
+  fs.mkdirSync(path.join(rootDir, "assets"));
   fs.writeFileSync(path.join(rootDir, "data", "fixture.json"), JSON.stringify({ synthetic: true }));
   fs.writeFileSync(path.join(rootDir, "data", "spartan-incubator.fixture.json"), JSON.stringify({ __synthetic: true }));
-  fs.writeFileSync(path.join(rootDir, "app.js"), "window.privateDashboard=true;");
+  fs.writeFileSync(path.join(rootDir, "assets", "app.js"), "window.privateDashboard=true;");
   fs.writeFileSync(path.join(rootDir, "server.js"), "SERVER SOURCE MUST NOT BE SERVED");
   fs.writeFileSync(path.join(rootDir, "package.json"), "{\"private\":true}");
-  const server = createApp({ rootDir, username: USERNAME, password: PASSWORD, sessionSecret: SECRET, ...options });
+  const oauth = options.oauth || fakeOAuth();
+  const server = createApp({ rootDir, clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: REDIRECT_URI, allowedEmail: ALLOWED_EMAIL, sessionSecret: SECRET, oauth, ...options });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
   t.after(() => new Promise(resolve => server.close(resolve)));
   t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
-  return origin;
+  return { origin, oauth };
+}
+
+function firstCookie(response, name) {
+  const values = typeof response.headers.getSetCookie === "function" ? response.headers.getSetCookie() : [response.headers.get("set-cookie")];
+  const found = values.find(value => value && value.startsWith(`${name}=`));
+  return found && found.split(";", 1)[0];
+}
+
+async function begin(origin, next = "/") {
+  const response = await fetch(`${origin}/auth/google?next=${encodeURIComponent(next)}`, { redirect: "manual" });
+  const location = new URL(response.headers.get("location"));
+  return { response, state: location.searchParams.get("state"), nonce: location.searchParams.get("nonce"), transactionCookie: firstCookie(response, "utampa_oauth_tx") };
 }
 
 async function signIn(origin, next = "/") {
-  const body = new URLSearchParams({ username: USERNAME, password: PASSWORD, next });
-  const response = await fetch(`${origin}/login`, { method: "POST", body, redirect: "manual" });
-  return { response, cookie: response.headers.get("set-cookie").split(";", 1)[0] };
+  const started = await begin(origin, next);
+  const callback = await fetch(`${origin}/auth/google/callback?state=${encodeURIComponent(started.state)}&code=valid-code`, { headers: { Cookie: started.transactionCookie }, redirect: "manual" });
+  return { ...started, callback, sessionCookie: firstCookie(callback, "utampa_session") };
 }
 
-test("startup fails closed when any credential or signing secret is absent or weak", () => {
-  assert.throws(() => createApp({ username: "", password: PASSWORD, sessionSecret: SECRET }), /UTAMPA_USERNAME/);
-  assert.throws(() => createApp({ username: USERNAME, password: "short", sessionSecret: SECRET }), /UTAMPA_PASSWORD/);
-  assert.throws(() => createApp({ username: USERNAME, password: PASSWORD, sessionSecret: "short" }), /UTAMPA_SESSION_SECRET/);
+test("startup fails closed when OAuth or session configuration is absent or weak", () => {
+  const base = { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: REDIRECT_URI, allowedEmail: ALLOWED_EMAIL, sessionSecret: SECRET, oauth: fakeOAuth() };
+  for (const key of ["clientId", "clientSecret", "redirectUri", "allowedEmail", "sessionSecret"]) {
+    const options = { ...base, [key]: "" };
+    assert.throws(() => createApp(options), /required/);
+  }
+  assert.throws(() => createApp({ ...base, clientSecret: "short" }), /GOOGLE_CLIENT_SECRET/);
+  assert.throws(() => createApp({ ...base, sessionSecret: "short" }), /UTAMPA_SESSION_SECRET/);
 });
 
-test("health is minimal while dashboard, scripts, fixture data, and deep links default deny", async t => {
-  const origin = await fixture(t);
+test("sign-in surface is branded, accessible, touch-sized, and contains no local credentials", async t => {
+  const { origin } = await fixture(t);
+  const normal = await fetch(`${origin}/login?next=%2Fservice%2Fspartan-incubator`);
+  const body = await normal.text();
+  assert.match(body, /University of Tampa/);
+  assert.match(body, /Continue with Google/);
+  assert.match(body, /min-height:48px/);
+  assert.doesNotMatch(body, /type="password"|name="username"/);
+  const error = await fetch(`${origin}/login?error=sign-in`);
+  const errorBody = await error.text();
+  assert.match(errorBody, /role="alert"/);
+  assert.match(errorBody, /aria-live="assertive"/);
+  assert.match(errorBody, /\.focus\(\)/);
+});
+
+test("authorization uses state, nonce, PKCE, openid/email scopes, and an HttpOnly transaction cookie", async t => {
+  const { origin, oauth } = await fixture(t);
+  const started = await begin(origin, "/service/spartan-incubator");
+  assert.equal(started.response.status, 303);
+  assert.ok(started.state && started.nonce);
+  const call = oauth.calls.find(item => item.type === "authorize");
+  assert.equal(call.state, started.state);
+  assert.equal(call.nonce, started.nonce);
+  assert.match(call.codeChallenge, /^[A-Za-z0-9_-]{43}$/);
+  assert.match(started.response.headers.get("set-cookie"), /HttpOnly/);
+  assert.match(started.response.headers.get("set-cookie"), /SameSite=Lax/);
+});
+
+test("callback is one-time, state-bound, email-allowlisted, and rejects provider errors without disclosure", async t => {
+  const wrongIdentity = fakeOAuth({ sub: "other-subject", email: "someone@example.edu" });
+  const { origin } = await fixture(t, { oauth: wrongIdentity });
+  const started = await begin(origin);
+  for (const url of [
+    `${origin}/auth/google/callback?state=wrong&code=valid-code`,
+    `${origin}/auth/google/callback?state=${started.state}&error=access_denied`,
+    `${origin}/auth/google/callback?state=${started.state}&code=valid-code`
+  ]) {
+    const response = await fetch(url, { headers: { Cookie: started.transactionCookie }, redirect: "manual" });
+    assert.equal(response.status, 303);
+    assert.equal(response.headers.get("location"), "/login?error=sign-in");
+    assert.doesNotMatch(await response.text(), /someone|access_denied|valid-code/i);
+  }
+});
+
+test("verified allowlisted identity creates an opaque revocable session and preserves safe deep links", async t => {
+  const { origin, oauth } = await fixture(t);
+  const signed = await signIn(origin, "/service/spartan-incubator");
+  assert.equal(signed.callback.status, 303);
+  assert.equal(signed.callback.headers.get("location"), "/service/spartan-incubator");
+  assert.match(signed.callback.headers.get("set-cookie"), /HttpOnly/);
+  assert.match(signed.callback.headers.get("set-cookie"), /SameSite=Lax/);
+  assert.ok(oauth.calls.find(item => item.type === "exchange").codeVerifier.length >= 43);
+  const dashboard = await fetch(`${origin}/`, { headers: { Cookie: signed.sessionCookie } });
+  assert.equal(dashboard.status, 200);
+  assert.match(await dashboard.text(), /PRIVATE DASHBOARD MARKER/);
+  const deepLink = await fetch(`${origin}/service/spartan-incubator`, { headers: { Cookie: signed.sessionCookie } });
+  assert.match(await deepLink.text(), /PRIVATE DASHBOARD MARKER/);
+  const external = await fetch(`${origin}/auth/google?next=${encodeURIComponent("//evil.example")}`, { redirect: "manual" });
+  const externalLocation = new URL(external.headers.get("location"));
+  const externalCallback = await fetch(`${origin}/auth/google/callback?state=${externalLocation.searchParams.get("state")}&code=valid-code`, { headers: { Cookie: firstCookie(external, "utampa_oauth_tx") }, redirect: "manual" });
+  assert.equal(externalCallback.headers.get("location"), "/");
+});
+
+test("only health and OAuth entry surfaces are public; private bytes default deny", async t => {
+  const { origin } = await fixture(t);
   const health = await fetch(`${origin}/healthz`);
-  assert.equal(health.status, 200);
   assert.deepEqual(await health.json(), { status: "ok" });
-  for (const route of ["/", "/data/spartan-incubator.fixture.json", "/service/spartan-incubator"]) {
+  for (const route of ["/", "/assets/app.js", "/data/spartan-incubator.fixture.json", "/service/spartan-incubator"]) {
     const response = await fetch(`${origin}${route}`, { redirect: "manual" });
     assert.equal(response.status, 303, route);
     assert.match(response.headers.get("location"), /^\/login\?next=/, route);
@@ -53,95 +152,66 @@ test("health is minimal while dashboard, scripts, fixture data, and deep links d
   }
 });
 
-test("bad login is denied and cannot redirect off-site", async t => {
-  const origin = await fixture(t);
-  const body = new URLSearchParams({ username: USERNAME, password: "wrong-password", next: "//evil.example" });
-  const response = await fetch(`${origin}/login`, { method: "POST", body, redirect: "manual" });
-  assert.equal(response.status, 401);
-  assert.match(await response.text(), /Sign-in failed/);
-});
-
-test("valid signed session serves dashboard, assets, fixture, HEAD, and SPA deep links", async t => {
-  const origin = await fixture(t);
-  const { response: login, cookie } = await signIn(origin, "/service/spartan-incubator");
-  assert.equal(login.status, 303);
-  assert.equal(login.headers.get("location"), "/service/spartan-incubator");
-  assert.match(login.headers.get("set-cookie"), /HttpOnly/);
-  assert.match(login.headers.get("set-cookie"), /SameSite=Strict/);
-  const dashboard = await fetch(`${origin}/`, { headers: { Cookie: cookie } });
-  assert.equal(dashboard.status, 200);
-  assert.match(await dashboard.text(), /PRIVATE DASHBOARD MARKER/);
-  const data = await fetch(`${origin}/data/spartan-incubator.fixture.json`, { headers: { Cookie: cookie } });
-  assert.deepEqual(await data.json(), { __synthetic: true });
-  const deepLink = await fetch(`${origin}/service/spartan-incubator`, { headers: { Cookie: cookie } });
-  assert.match(await deepLink.text(), /PRIVATE DASHBOARD MARKER/);
-  const retiredSiblingRoute = await fetch(`${origin}/boss/`, { headers: { Cookie: cookie } });
-  assert.equal(retiredSiblingRoute.status, 404);
-  const head = await fetch(`${origin}/`, { method: "HEAD", headers: { Cookie: cookie } });
-  assert.equal(head.status, 200);
-  assert.equal(await head.text(), "");
-});
-
-test("authenticated delivery serves only approved public assets, never repository or hidden files", async t => {
-  const origin = await fixture(t);
-  const { cookie } = await signIn(origin);
-  for (const route of ["/server.js", "/package.json", "/docs/RELEASE-HANDOFF.md", "/.env", "/.git/config", "/data/fixture.json"]) {
-    const response = await fetch(`${origin}${route}`, { headers: { Cookie: cookie }, redirect: "manual" });
+test("authenticated delivery allowlists approved assets and denies repository, hidden, and sibling paths", async t => {
+  const { origin } = await fixture(t);
+  const { sessionCookie } = await signIn(origin);
+  const fixtureResponse = await fetch(`${origin}/data/spartan-incubator.fixture.json`, { headers: { Cookie: sessionCookie } });
+  assert.deepEqual(await fixtureResponse.json(), { __synthetic: true });
+  const asset = await fetch(`${origin}/assets/app.js`, { headers: { Cookie: sessionCookie } });
+  assert.match(await asset.text(), /privateDashboard/);
+  for (const route of ["/server.js", "/package.json", "/docs/RELEASE-HANDOFF.md", "/.env", "/.git/config", "/data/fixture.json", "/boss/"]) {
+    const response = await fetch(`${origin}${route}`, { headers: { Cookie: sessionCookie }, redirect: "manual" });
     assert.equal(response.status, 404, route);
-    const body = await response.text();
-    assert.doesNotMatch(body, /SERVER SOURCE|private|PRIVATE DASHBOARD MARKER|synthetic/i, route);
+    assert.doesNotMatch(await response.text(), /SERVER SOURCE|private|PRIVATE DASHBOARD MARKER|synthetic/i, route);
   }
 });
 
-test("tampered and expired sessions are rejected", async t => {
+test("tampered, expired, and logged-out sessions are denied", async t => {
   let current = 1_700_000_000_000;
-  const origin = await fixture(t, { now: () => current, ttlMs: 1000 });
-  const { cookie } = await signIn(origin);
-  const tampered = `${cookie.slice(0, -1)}${cookie.endsWith("a") ? "b" : "a"}`;
+  const { origin } = await fixture(t, { now: () => current, ttlMs: 1000 });
+  const first = await signIn(origin);
+  const tampered = `${first.sessionCookie.slice(0, -1)}${first.sessionCookie.endsWith("a") ? "b" : "a"}`;
   assert.equal((await fetch(`${origin}/`, { headers: { Cookie: tampered }, redirect: "manual" })).status, 303);
+  const logout = await fetch(`${origin}/logout`, { method: "POST", headers: { Cookie: first.sessionCookie }, redirect: "manual" });
+  assert.equal(logout.status, 303);
+  assert.equal((await fetch(`${origin}/`, { headers: { Cookie: first.sessionCookie }, redirect: "manual" })).status, 303);
+  const second = await signIn(origin);
   current += 1001;
-  assert.equal((await fetch(`${origin}/`, { headers: { Cookie: cookie }, redirect: "manual" })).status, 303);
+  assert.equal((await fetch(`${origin}/`, { headers: { Cookie: second.sessionCookie }, redirect: "manual" })).status, 303);
 });
 
-test("logout clears and server-side revokes the session", async t => {
-  const origin = await fixture(t);
-  const { cookie } = await signIn(origin);
-  const response = await fetch(`${origin}/logout`, { headers: { Cookie: cookie }, redirect: "manual" });
-  assert.equal(response.status, 303);
-  assert.equal(response.headers.get("location"), "/login");
-  assert.match(response.headers.get("set-cookie"), /Max-Age=0/);
-  const replay = await fetch(`${origin}/`, { headers: { Cookie: cookie }, redirect: "manual" });
-  assert.equal(replay.status, 303);
-  assert.match(replay.headers.get("location"), /^\/login\?next=/);
+test("malformed paths and unsupported methods fail safely", async t => {
+  const { origin } = await fixture(t);
+  assert.equal((await fetch(`${origin}/%E0%A4%A`, { redirect: "manual" })).status, 400);
+  assert.equal((await fetch(`${origin}/healthz`, { method: "POST", redirect: "manual" })).status, 405);
+  assert.equal((await fetch(`${origin}/logout`, { method: "GET", redirect: "manual" })).status, 405);
+  assert.equal((await fetch(`${origin}/auth/google`, { method: "POST", redirect: "manual" })).status, 405);
 });
 
-test("login attempts are bounded and oversized or malformed requests fail safely", async t => {
-  const origin = await fixture(t);
-  for (let i = 0; i < 10; i += 1) {
-    const body = new URLSearchParams({ username: USERNAME, password: "wrong-password", next: "/" });
-    const response = await fetch(`${origin}/login`, { method: "POST", body, redirect: "manual" });
-    assert.equal(response.status, 401);
-  }
-  const blocked = await fetch(`${origin}/login`, {
-    method: "POST",
-    body: new URLSearchParams({ username: USERNAME, password: "wrong-password", next: "/" }),
-    redirect: "manual"
-  });
-  assert.equal(blocked.status, 429);
-  assert.ok(Number(blocked.headers.get("retry-after")) > 0);
-
-  const separate = await fixture(t);
-  const oversized = await fetch(`${separate}/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: "x=".concat("a".repeat(9000)),
-    redirect: "manual"
-  });
-  assert.equal(oversized.status, 413);
-  const malformed = await fetch(`${separate}/%E0%A4%A`, { redirect: "manual" });
-  assert.equal(malformed.status, 400);
-  const healthPost = await fetch(`${separate}/healthz`, { method: "POST", redirect: "manual" });
-  assert.equal(healthPost.status, 405);
+test("Google provider verifies token signature and required claims", async () => {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const jwk = publicKey.export({ format: "jwk" });
+  Object.assign(jwk, { kid: "synthetic-key", use: "sig", alg: "RS256" });
+  const now = 1_700_000_000_000;
+  const claims = { iss: "https://accounts.google.com", aud: CLIENT_ID, exp: now / 1000 + 600, iat: now / 1000, nonce: "expected-nonce", email_verified: true, email: ALLOWED_EMAIL, sub: "google-subject-123" };
+  const header = Buffer.from(JSON.stringify({ alg: "RS256", kid: jwk.kid })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
+  const signature = crypto.sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), privateKey).toString("base64url");
+  const idToken = `${header}.${payload}.${signature}`;
+  const requests = [];
+  const fetchImpl = async (url, options = {}) => {
+    requests.push({ url, options });
+    if (url.includes("/token")) return new Response(JSON.stringify({ id_token: idToken }), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({ keys: [jwk] }), { status: 200, headers: { "content-type": "application/json", "cache-control": "public,max-age=300" } });
+  };
+  const provider = createGoogleOAuthProvider({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: REDIRECT_URI, fetchImpl, now: () => now });
+  const auth = new URL(provider.authorizationUrl({ state: "state", nonce: "expected-nonce", codeChallenge: "challenge" }));
+  assert.equal(auth.searchParams.get("scope"), "openid email");
+  assert.equal(auth.searchParams.get("code_challenge_method"), "S256");
+  const identity = await provider.exchangeAndVerify({ code: "code", codeVerifier: "verifier", expectedNonce: "expected-nonce" });
+  assert.deepEqual(identity, { sub: claims.sub, email: claims.email });
+  assert.match(String(requests[0].options.body), /code_verifier=verifier/);
+  await assert.rejects(() => provider.exchangeAndVerify({ code: "code", codeVerifier: "verifier", expectedNonce: "wrong" }), /claims rejected/);
 });
 
 test("repository data contract stays synthetic and unknown is never coerced to zero", () => {

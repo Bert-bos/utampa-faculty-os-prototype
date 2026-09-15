@@ -7,32 +7,24 @@ const path = require("node:path");
 const { URL, URLSearchParams } = require("node:url");
 
 const COOKIE_NAME = "utampa_session";
+const TRANSACTION_COOKIE = "utampa_oauth_tx";
 const DEFAULT_TTL_MS = 8 * 60 * 60 * 1000;
-const MAX_BODY_BYTES = 8 * 1024;
-const LOGIN_WINDOW_MS = 15 * 60 * 1000;
-const LOGIN_MAX_ATTEMPTS = 10;
+const TRANSACTION_TTL_MS = 10 * 60 * 1000;
+const AUTH_WINDOW_MS = 15 * 60 * 1000;
+const AUTH_MAX_ATTEMPTS = 20;
+const MAX_PENDING_AUTH = 500;
+const GOOGLE_ISSUERS = new Set(["accounts.google.com", "https://accounts.google.com"]);
+const GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
+const GOOGLE_JWKS_ENDPOINT = "https://www.googleapis.com/oauth2/v3/certs";
 const CONTENT_TYPES = {
-  ".css": "text/css; charset=utf-8",
-  ".html": "text/html; charset=utf-8",
-  ".ico": "image/x-icon",
-  ".js": "text/javascript; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".png": "image/png",
-  ".svg": "image/svg+xml; charset=utf-8",
-  ".webp": "image/webp",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2"
+  ".css": "text/css; charset=utf-8", ".html": "text/html; charset=utf-8", ".ico": "image/x-icon",
+  ".js": "text/javascript; charset=utf-8", ".json": "application/json; charset=utf-8", ".png": "image/png",
+  ".svg": "image/svg+xml; charset=utf-8", ".webp": "image/webp", ".woff": "font/woff", ".woff2": "font/woff2"
 };
 const ROOT_ASSETS = new Set([
-  "index.html",
-  "utampa-logo.svg",
-  "favicon.svg",
-  "cc-shell-responsive.v1.css",
-  "cc-recorder.css",
-  "cc-workspace-switcher.v2.js",
-  "cc-shell-shim.v1.js",
-  "cc-recorder.js",
-  "cc-incubator-adapter.v1.js"
+  "index.html", "utampa-logo.svg", "favicon.svg", "cc-shell-responsive.v1.css", "cc-recorder.css",
+  "cc-workspace-switcher.v2.js", "cc-shell-shim.v1.js", "cc-recorder.js", "cc-incubator-adapter.v1.js"
 ]);
 
 function required(name, value, minLength = 1) {
@@ -48,29 +40,25 @@ function safeEqual(left, right) {
   return crypto.timingSafeEqual(a, b);
 }
 
-function encode(value) {
-  return Buffer.from(value, "utf8").toString("base64url");
-}
+function encode(value) { return Buffer.from(value, "utf8").toString("base64url"); }
+function sign(value, secret) { return crypto.createHmac("sha256", secret).update(value).digest("base64url"); }
+function tokenKey(token) { return crypto.createHash("sha256").update(String(token || "")).digest("base64url"); }
 
-function sign(value, secret) {
-  return crypto.createHmac("sha256", secret).update(value).digest("base64url");
-}
-
-function createSession(username, secret, expiresAt, sessionId = crypto.randomBytes(16).toString("base64url")) {
-  const payload = encode(JSON.stringify({ username, expiresAt, sessionId }));
+function createSession(identity, secret, expiresAt, sessionId = crypto.randomBytes(16).toString("base64url")) {
+  const payload = encode(JSON.stringify({ sub: identity.sub, email: identity.email, expiresAt, sessionId }));
   return `${payload}.${sign(payload, secret)}`;
 }
 
-function readSession(token, username, secret, now) {
+function readSession(token, allowedEmail, secret, now) {
   if (!token || !token.includes(".")) return false;
   const [payload, suppliedSignature, ...extra] = token.split(".");
   if (extra.length || !safeEqual(sign(payload, secret), suppliedSignature)) return false;
   try {
     const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return parsed.username === username && Number.isFinite(parsed.expiresAt) && parsed.expiresAt > now();
-  } catch {
-    return false;
-  }
+    return typeof parsed.sub === "string" && parsed.sub.length > 0 &&
+      typeof parsed.email === "string" && parsed.email.toLowerCase() === allowedEmail.toLowerCase() &&
+      Number.isFinite(parsed.expiresAt) && parsed.expiresAt > now();
+  } catch { return false; }
 }
 
 function parseCookies(header = "") {
@@ -86,9 +74,8 @@ function parseCookies(header = "") {
 }
 
 function safeNext(value) {
-  return typeof value === "string" && value.startsWith("/") && !value.startsWith("//") && !value.startsWith("/login")
-    ? value
-    : "/";
+  return typeof value === "string" && value.startsWith("/") && !value.startsWith("//") &&
+    !value.startsWith("/login") && !value.startsWith("/auth/") ? value : "/";
 }
 
 function securityHeaders(contentType) {
@@ -108,56 +95,104 @@ function send(res, status, body, contentType = "text/plain; charset=utf-8", extr
   res.end(body);
 }
 
-function loginPage(next, error = false) {
-  const escapedNext = next.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>UTampa Faculty OS sign in</title></head><body><main><h1>UTampa Faculty OS</h1>${error ? "<p role=alert>Sign-in failed.</p>" : ""}<form method="post" action="/login"><input type="hidden" name="next" value="${escapedNext}"><label>Username <input name="username" autocomplete="username" required></label><label>Password <input name="password" type="password" autocomplete="current-password" required></label><button type="submit">Sign in</button></form><p>This private prototype contains synthetic demonstration data only.</p></main></body></html>`;
+function signInPage(next, error = false) {
+  const alert = error ? '<p id="auth-error" class="error" role="alert" aria-live="assertive" tabindex="-1">We could not complete sign-in. Please try again with the authorized University account.</p>' : "";
+  const focus = error ? '<script>document.getElementById("auth-error").focus()</script>' : "";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in — UTampa Faculty OS</title><style>:root{font-family:Inter,Arial,sans-serif;color:#171717;background:#f5f5f3}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}main{width:min(100%,480px);background:#fff;border-top:8px solid #d71920;border-radius:12px;box-shadow:0 16px 48px #0002;padding:32px}h1{margin:0 0 8px;font-size:clamp(1.75rem,6vw,2.25rem)}p{line-height:1.5}.eyebrow{font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#8f1015}.google{min-height:48px;width:100%;display:flex;align-items:center;justify-content:center;margin:24px 0 16px;border:2px solid #171717;border-radius:8px;background:#171717;color:#fff;font-weight:700;text-decoration:none}.google:focus-visible{outline:4px solid #f1c400;outline-offset:3px}.error{border-left:4px solid #d71920;background:#fff2f2;padding:12px}.note{font-size:.92rem;color:#4b4b4b}</style></head><body><main><p class="eyebrow">University of Tampa</p><h1>Faculty OS</h1><p>Use your authorized Google account to open the private dashboard.</p>${alert}<a class="google" data-testid="google-sign-in" href="/auth/google?next=${encodeURIComponent(next)}">Continue with Google</a><p class="note">This prototype contains synthetic demonstration data only. It is not a live University system of record.</p></main>${focus}</body></html>`;
 }
 
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    let bytes = 0;
-    let tooLarge = false;
-    req.setEncoding("utf8");
-    req.on("data", chunk => {
-      if (tooLarge) return;
-      bytes += Buffer.byteLength(chunk);
-      if (bytes > MAX_BODY_BYTES) {
-        tooLarge = true;
-        reject(Object.assign(new Error("request body too large"), { status: 413 }));
-        return;
+function parseJwtPart(value) {
+  try { return JSON.parse(Buffer.from(value, "base64url").toString("utf8")); }
+  catch { throw new Error("invalid identity token"); }
+}
+
+function createGoogleOAuthProvider(config) {
+  const { clientId, clientSecret, redirectUri, fetchImpl = fetch, now = Date.now } = config;
+  let jwksCache = { expiresAt: 0, keys: [] };
+  async function getKeys() {
+    if (jwksCache.expiresAt > now() && jwksCache.keys.length) return jwksCache.keys;
+    const response = await fetchImpl(GOOGLE_JWKS_ENDPOINT, { headers: { Accept: "application/json" } });
+    if (!response.ok) throw new Error("identity key fetch failed");
+    const body = await response.json();
+    if (!Array.isArray(body.keys)) throw new Error("identity key response invalid");
+    const maxAge = /max-age=(\d+)/i.exec(response.headers.get("cache-control") || "");
+    jwksCache = { keys: body.keys, expiresAt: now() + Math.min(Number(maxAge?.[1] || 300), 3600) * 1000 };
+    return jwksCache.keys;
+  }
+  return {
+    authorizationUrl({ state, nonce, codeChallenge }) {
+      const url = new URL(GOOGLE_AUTHORIZATION_ENDPOINT);
+      url.search = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: "code", scope: "openid email", state, nonce, code_challenge: codeChallenge, code_challenge_method: "S256", prompt: "select_account" });
+      return url.toString();
+    },
+    async exchangeAndVerify({ code, codeVerifier, expectedNonce }) {
+      const response = await fetchImpl(GOOGLE_TOKEN_ENDPOINT, {
+        method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+        body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, code, code_verifier: codeVerifier, grant_type: "authorization_code", redirect_uri: redirectUri })
+      });
+      if (!response.ok) throw new Error("identity token exchange failed");
+      const token = await response.json();
+      if (typeof token.id_token !== "string") throw new Error("identity token missing");
+      const parts = token.id_token.split(".");
+      if (parts.length !== 3) throw new Error("identity token malformed");
+      const header = parseJwtPart(parts[0]);
+      const claims = parseJwtPart(parts[1]);
+      if (header.alg !== "RS256" || typeof header.kid !== "string") throw new Error("identity token algorithm rejected");
+      const jwk = (await getKeys()).find(candidate => candidate.kid === header.kid && candidate.kty === "RSA");
+      if (!jwk) throw new Error("identity signing key not found");
+      const verified = crypto.verify("RSA-SHA256", Buffer.from(`${parts[0]}.${parts[1]}`), crypto.createPublicKey({ key: jwk, format: "jwk" }), Buffer.from(parts[2], "base64url"));
+      if (!verified) throw new Error("identity token signature rejected");
+      const seconds = Math.floor(now() / 1000);
+      const audienceOk = claims.aud === clientId || (Array.isArray(claims.aud) && claims.aud.includes(clientId) && claims.azp === clientId);
+      if (!GOOGLE_ISSUERS.has(claims.iss) || !audienceOk || !Number.isFinite(claims.exp) || claims.exp <= seconds ||
+          (Number.isFinite(claims.iat) && claims.iat > seconds + 300) || claims.nonce !== expectedNonce ||
+          claims.email_verified !== true || typeof claims.email !== "string" || typeof claims.sub !== "string" || !claims.sub) {
+        throw new Error("identity token claims rejected");
       }
-      body += chunk;
-    });
-    req.on("end", () => { if (!tooLarge) resolve(body); });
-    req.on("error", reject);
-  });
+      return { sub: claims.sub, email: claims.email };
+    }
+  };
 }
 
-function tokenKey(token) {
-  return crypto.createHash("sha256").update(String(token || "")).digest("base64url");
+function createSyntheticOAuthProvider() {
+  return {
+    synthetic: true,
+    authorizationUrl({ state, nonce }) { return `/__test/authorize?state=${encodeURIComponent(state)}&nonce=${encodeURIComponent(nonce)}`; },
+    async exchangeAndVerify({ code, expectedNonce }) {
+      if (code !== `synthetic:${expectedNonce}`) throw new Error("synthetic identity rejected");
+      return { sub: "synthetic-subject", email: "bert@utampa.edu" };
+    }
+  };
 }
 
 function createApp(options = {}) {
   const rootDir = path.resolve(options.rootDir || __dirname);
-  const username = required("UTAMPA_USERNAME", options.username ?? process.env.UTAMPA_USERNAME);
-  const password = required("UTAMPA_PASSWORD", options.password ?? process.env.UTAMPA_PASSWORD, 12);
+  const clientId = required("GOOGLE_CLIENT_ID", options.clientId ?? process.env.GOOGLE_CLIENT_ID);
+  const clientSecret = required("GOOGLE_CLIENT_SECRET", options.clientSecret ?? process.env.GOOGLE_CLIENT_SECRET, 12);
+  const redirectUri = required("GOOGLE_REDIRECT_URI", options.redirectUri ?? process.env.GOOGLE_REDIRECT_URI);
+  const allowedEmail = required("UTAMPA_ALLOWED_EMAIL", options.allowedEmail ?? process.env.UTAMPA_ALLOWED_EMAIL);
   const sessionSecret = required("UTAMPA_SESSION_SECRET", options.sessionSecret ?? process.env.UTAMPA_SESSION_SECRET, 32);
   const ttlMs = options.ttlMs || DEFAULT_TTL_MS;
   const now = options.now || Date.now;
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === "production";
+  const allowSynthetic = process.env.NODE_ENV === "test" && process.env.UTAMPA_SYNTHETIC_OIDC === "1";
+  const oauth = options.oauth || (allowSynthetic ? createSyntheticOAuthProvider() : createGoogleOAuthProvider({ clientId, clientSecret, redirectUri, fetchImpl: options.fetchImpl, now }));
   const activeSessions = new Map();
-  const loginAttempts = new Map();
+  const pendingAuth = new Map();
+  const authAttempts = new Map();
+
+  function clean(current) {
+    for (const [key, expiresAt] of activeSessions) if (expiresAt <= current) activeSessions.delete(key);
+    for (const [key, transaction] of pendingAuth) if (transaction.expiresAt <= current) pendingAuth.delete(key);
+    for (const [key, attempt] of authAttempts) if (attempt.resetAt <= current) authAttempts.delete(key);
+  }
 
   return http.createServer(async (req, res) => {
     try {
       const requestUrl = new URL(req.url, "http://localhost");
       let pathname;
-      try {
-        pathname = decodeURIComponent(requestUrl.pathname);
-      } catch {
-        return send(res, 400, "Bad request");
-      }
+      try { pathname = decodeURIComponent(requestUrl.pathname); }
+      catch { return send(res, 400, "Bad request"); }
 
       if (pathname === "/healthz") {
         if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, "Method not allowed", undefined, { Allow: "GET, HEAD" });
@@ -165,57 +200,83 @@ function createApp(options = {}) {
         return send(res, 200, req.method === "HEAD" ? "" : body, "application/json; charset=utf-8");
       }
 
-      if (pathname === "/login" && req.method === "GET") {
-        return send(res, 200, loginPage(safeNext(requestUrl.searchParams.get("next")) || "/"), "text/html; charset=utf-8");
+      if (pathname === "/login") {
+        if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, "Method not allowed", undefined, { Allow: "GET, HEAD" });
+        const body = signInPage(safeNext(requestUrl.searchParams.get("next")), requestUrl.searchParams.has("error"));
+        return send(res, 200, req.method === "HEAD" ? "" : body, "text/html; charset=utf-8");
       }
 
-      if (pathname === "/login" && req.method === "POST") {
+      if (pathname === "/auth/google") {
+        if (req.method !== "GET") return send(res, 405, "Method not allowed", undefined, { Allow: "GET" });
+        const current = now(); clean(current);
         const attemptKey = req.socket.remoteAddress || "unknown";
-        const current = now();
-        const attempt = loginAttempts.get(attemptKey);
-        if (attempt && attempt.resetAt > current && attempt.count >= LOGIN_MAX_ATTEMPTS) {
-          return send(res, 429, "Too many sign-in attempts", undefined, { "Retry-After": String(Math.ceil((attempt.resetAt - current) / 1000)) });
+        const attempt = authAttempts.get(attemptKey);
+        if (attempt && attempt.count >= AUTH_MAX_ATTEMPTS) return send(res, 429, "Too many sign-in attempts", undefined, { "Retry-After": String(Math.ceil((attempt.resetAt - current) / 1000)) });
+        authAttempts.set(attemptKey, attempt ? { ...attempt, count: attempt.count + 1 } : { count: 1, resetAt: current + AUTH_WINDOW_MS });
+        if (pendingAuth.size >= MAX_PENDING_AUTH) return send(res, 503, "Sign-in is temporarily unavailable");
+        const state = crypto.randomBytes(24).toString("base64url");
+        const nonce = crypto.randomBytes(24).toString("base64url");
+        const codeVerifier = crypto.randomBytes(48).toString("base64url");
+        const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
+        pendingAuth.set(tokenKey(state), { state, nonce, codeVerifier, next: safeNext(requestUrl.searchParams.get("next")), expiresAt: current + TRANSACTION_TTL_MS });
+        const transactionCookie = `${TRANSACTION_COOKIE}=${state}; HttpOnly; Path=/auth/google/callback; SameSite=Lax; Max-Age=${Math.floor(TRANSACTION_TTL_MS / 1000)}${secureCookies ? "; Secure" : ""}`;
+        res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: oauth.authorizationUrl({ state, nonce, codeChallenge }), "Set-Cookie": transactionCookie });
+        return res.end("Continue to Google");
+      }
+
+      if (pathname === "/__test/authorize" && oauth.synthetic) {
+        if (process.env.NODE_ENV !== "test" || req.method !== "GET") return send(res, 404, "Not found");
+        const state = requestUrl.searchParams.get("state") || "";
+        const nonce = requestUrl.searchParams.get("nonce") || "";
+        res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: `/auth/google/callback?state=${encodeURIComponent(state)}&code=${encodeURIComponent(`synthetic:${nonce}`)}` });
+        return res.end("Synthetic identity redirect");
+      }
+
+      if (pathname === "/auth/google/callback") {
+        if (req.method !== "GET") return send(res, 405, "Method not allowed", undefined, { Allow: "GET" });
+        const current = now(); clean(current);
+        const state = requestUrl.searchParams.get("state") || "";
+        const cookieState = parseCookies(req.headers.cookie)[TRANSACTION_COOKIE] || "";
+        const transaction = pendingAuth.get(tokenKey(state));
+        pendingAuth.delete(tokenKey(state));
+        const clearTransaction = `${TRANSACTION_COOKIE}=; HttpOnly; Path=/auth/google/callback; SameSite=Lax; Max-Age=0${secureCookies ? "; Secure" : ""}`;
+        if (!transaction || transaction.expiresAt <= current || !safeEqual(state, cookieState) || !safeEqual(state, transaction.state) || requestUrl.searchParams.has("error")) {
+          res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: "/login?error=sign-in", "Set-Cookie": clearTransaction });
+          return res.end("Sign-in rejected");
         }
-        const fields = new URLSearchParams(await readBody(req));
-        const next = safeNext(fields.get("next"));
-        if (!safeEqual(fields.get("username") || "", username) || !safeEqual(fields.get("password") || "", password)) {
-          const fresh = !attempt || attempt.resetAt <= current;
-          loginAttempts.set(attemptKey, fresh ? { count: 1, resetAt: current + LOGIN_WINDOW_MS } : { ...attempt, count: attempt.count + 1 });
-          return send(res, 401, loginPage(next, true), "text/html; charset=utf-8");
+        let identity;
+        try { identity = await oauth.exchangeAndVerify({ code: requestUrl.searchParams.get("code") || "", codeVerifier: transaction.codeVerifier, expectedNonce: transaction.nonce }); }
+        catch { identity = null; }
+        if (!identity || !safeEqual(String(identity.email).toLowerCase(), allowedEmail.toLowerCase()) || typeof identity.sub !== "string" || !identity.sub) {
+          res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: "/login?error=sign-in", "Set-Cookie": clearTransaction });
+          return res.end("Sign-in rejected");
         }
-        loginAttempts.delete(attemptKey);
-        for (const [key, expiresAt] of activeSessions) {
-          if (expiresAt <= current) activeSessions.delete(key);
-        }
+        authAttempts.delete(req.socket.remoteAddress || "unknown");
         const expiresAt = current + ttlMs;
-        const token = createSession(username, sessionSecret, expiresAt);
+        const token = createSession(identity, sessionSecret, expiresAt);
         activeSessions.set(tokenKey(token), expiresAt);
-        const cookie = COOKIE_NAME + "=" + token + "; HttpOnly; Path=/; SameSite=Strict; Max-Age=" + Math.floor(ttlMs / 1000) + (secureCookies ? "; Secure" : "");
-        res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: next, "Set-Cookie": cookie });
+        const sessionCookie = `${COOKIE_NAME}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(ttlMs / 1000)}${secureCookies ? "; Secure" : ""}`;
+        res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: transaction.next, "Set-Cookie": [clearTransaction, sessionCookie] });
         return res.end("Signed in");
       }
 
       if (pathname === "/logout") {
+        if (req.method !== "POST") return send(res, 405, "Method not allowed", undefined, { Allow: "POST" });
         const logoutToken = parseCookies(req.headers.cookie)[COOKIE_NAME];
         activeSessions.delete(tokenKey(logoutToken));
-        res.writeHead(303, {
-          ...securityHeaders("text/plain; charset=utf-8"),
-          Location: "/login",
-          "Set-Cookie": `${COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0${secureCookies ? "; Secure" : ""}`
-        });
+        res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: "/login", "Set-Cookie": `${COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secureCookies ? "; Secure" : ""}` });
         return res.end("Signed out");
       }
 
       const token = parseCookies(req.headers.cookie)[COOKIE_NAME];
       const current = now();
       const activeUntil = activeSessions.get(tokenKey(token));
-      if (!readSession(token, username, sessionSecret, now) || !Number.isFinite(activeUntil) || activeUntil <= current) {
+      if (!readSession(token, allowedEmail, sessionSecret, now) || !Number.isFinite(activeUntil) || activeUntil <= current) {
         activeSessions.delete(tokenKey(token));
         const next = safeNext(`${pathname}${requestUrl.search}`);
         res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: `/login?next=${encodeURIComponent(next)}` });
         return res.end("Authentication required");
       }
-
       if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, "Method not allowed", undefined, { Allow: "GET, HEAD" });
 
       const relative = pathname.replace(/^\/+/, "");
@@ -225,26 +286,18 @@ function createApp(options = {}) {
       const isSyntheticFixture = relative === "data/spartan-incubator.fixture.json";
       const isRootAsset = ROOT_ASSETS.has(relative || "index.html");
       const isDeepLink = !relative || relative.endsWith("/") || !path.posix.extname(relative);
-      const reservedMissingPath = segments[0] === "assets" || segments[0] === "data" || segments[0] === "boss";
-
+      const reservedMissingPath = ["assets", "data", "boss", "auth", "login", "logout", "__test"].includes(segments[0]);
       if (hasHiddenSegment) return send(res, 404, "Not found");
-
       let selected;
       if (isRootAsset) selected = relative || "index.html";
       else if (isCompiledAsset || isSyntheticFixture) selected = relative;
       else if (isDeepLink && !reservedMissingPath) selected = "index.html";
       else return send(res, 404, "Not found");
-
       const filePath = path.resolve(rootDir, selected);
       if (filePath !== rootDir && !filePath.startsWith(`${rootDir}${path.sep}`)) return send(res, 400, "Bad request");
-
-      let stat;
-      try { stat = await fs.promises.stat(filePath); } catch {}
+      let stat; try { stat = await fs.promises.stat(filePath); } catch {}
       if (!stat || !stat.isFile()) return send(res, 404, "Not found");
-
-      const contentType = CONTENT_TYPES[path.extname(filePath).toLowerCase()] || "application/octet-stream";
-      const headers = securityHeaders(contentType);
-      res.writeHead(200, headers);
+      res.writeHead(200, securityHeaders(CONTENT_TYPES[path.extname(filePath).toLowerCase()] || "application/octet-stream"));
       if (req.method === "HEAD") return res.end();
       fs.createReadStream(filePath).on("error", () => res.destroy()).pipe(res);
     } catch (error) {
@@ -256,8 +309,7 @@ function createApp(options = {}) {
 
 if (require.main === module) {
   const port = Number(process.env.PORT || 3000);
-  const server = createApp();
-  server.listen(port, "0.0.0.0", () => console.log(`UTampa Faculty OS listening on ${port}`));
+  createApp().listen(port, "0.0.0.0", () => console.log(`UTampa Faculty OS listening on ${port}`));
 }
 
-module.exports = { COOKIE_NAME, createApp, createSession, readSession, safeNext };
+module.exports = { COOKIE_NAME, TRANSACTION_COOKIE, createApp, createGoogleOAuthProvider, createSession, readSession, safeNext, signInPage };
