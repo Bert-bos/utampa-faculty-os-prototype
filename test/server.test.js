@@ -75,6 +75,8 @@ test("valid signed session serves dashboard, assets, fixture, HEAD, and SPA deep
   assert.deepEqual(await data.json(), { __synthetic: true });
   const deepLink = await fetch(`${origin}/service/spartan-incubator`, { headers: { Cookie: cookie } });
   assert.match(await deepLink.text(), /PRIVATE DASHBOARD MARKER/);
+  const retiredSiblingRoute = await fetch(`${origin}/boss/`, { headers: { Cookie: cookie } });
+  assert.equal(retiredSiblingRoute.status, 404);
   const head = await fetch(`${origin}/`, { method: "HEAD", headers: { Cookie: cookie } });
   assert.equal(head.status, 200);
   assert.equal(await head.text(), "");
@@ -101,13 +103,45 @@ test("tampered and expired sessions are rejected", async t => {
   assert.equal((await fetch(`${origin}/`, { headers: { Cookie: cookie }, redirect: "manual" })).status, 303);
 });
 
-test("logout clears the session cookie", async t => {
+test("logout clears and server-side revokes the session", async t => {
   const origin = await fixture(t);
   const { cookie } = await signIn(origin);
   const response = await fetch(`${origin}/logout`, { headers: { Cookie: cookie }, redirect: "manual" });
   assert.equal(response.status, 303);
   assert.equal(response.headers.get("location"), "/login");
   assert.match(response.headers.get("set-cookie"), /Max-Age=0/);
+  const replay = await fetch(`${origin}/`, { headers: { Cookie: cookie }, redirect: "manual" });
+  assert.equal(replay.status, 303);
+  assert.match(replay.headers.get("location"), /^\/login\?next=/);
+});
+
+test("login attempts are bounded and oversized or malformed requests fail safely", async t => {
+  const origin = await fixture(t);
+  for (let i = 0; i < 10; i += 1) {
+    const body = new URLSearchParams({ username: USERNAME, password: "wrong-password", next: "/" });
+    const response = await fetch(`${origin}/login`, { method: "POST", body, redirect: "manual" });
+    assert.equal(response.status, 401);
+  }
+  const blocked = await fetch(`${origin}/login`, {
+    method: "POST",
+    body: new URLSearchParams({ username: USERNAME, password: "wrong-password", next: "/" }),
+    redirect: "manual"
+  });
+  assert.equal(blocked.status, 429);
+  assert.ok(Number(blocked.headers.get("retry-after")) > 0);
+
+  const separate = await fixture(t);
+  const oversized = await fetch(`${separate}/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: "x=".concat("a".repeat(9000)),
+    redirect: "manual"
+  });
+  assert.equal(oversized.status, 413);
+  const malformed = await fetch(`${separate}/%E0%A4%A`, { redirect: "manual" });
+  assert.equal(malformed.status, 400);
+  const healthPost = await fetch(`${separate}/healthz`, { method: "POST", redirect: "manual" });
+  assert.equal(healthPost.status, 405);
 });
 
 test("repository data contract stays synthetic and unknown is never coerced to zero", () => {
