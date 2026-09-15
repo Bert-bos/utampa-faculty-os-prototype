@@ -32,6 +32,8 @@
 
   var DATA_SOURCE_URL = "/data/spartan-incubator.fixture.json";
   var DEFAULT_STALE_HOURS = 168;
+  var latestResult;
+  var resultReady = false;
 
   function formatCount(n) {
     return (n === null || n === undefined) ? "no data" : String(n);
@@ -209,6 +211,7 @@
   function render(data) {
     var col = findServiceColumn();
     if (!col) return;
+    col.setAttribute("data-cc-incubator-rendered", "true");
     if (!data) {
       renderMissing(col);
       return;
@@ -224,11 +227,30 @@
         if (!res.ok) throw new Error("fetch failed: " + res.status);
         return res.json();
       })
-      .then(function (data) { render(data); })
+      .then(function (data) {
+        latestResult = data;
+        resultReady = true;
+        render(data);
+      })
       .catch(function (err) {
         console.warn("[cc-incubator-adapter v1] falling back to missing-data state:", err);
+        latestResult = null;
+        resultReady = true;
         render(null);
       });
+
+    /* VINEXT hydration can replace the server-rendered Service column after
+       this additive adapter has populated it. Reapply only when replacement
+       nodes no longer carry our marker, preserving a single rendered state. */
+    if (window.MutationObserver && document.body) {
+      var observer = new MutationObserver(function (records) {
+        if (!resultReady) return;
+        var changed = records.some(function (record) { return record.addedNodes.length > 0; });
+        var col = changed ? findServiceColumn() : null;
+        if (col && !col.hasAttribute("data-cc-incubator-rendered")) render(latestResult);
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
   }
 
   if (document.readyState === "loading") {
