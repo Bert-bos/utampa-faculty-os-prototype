@@ -16,7 +16,10 @@ async function fixture(t, options = {}) {
   fs.writeFileSync(path.join(rootDir, "index.html"), "<h1>PRIVATE DASHBOARD MARKER</h1>");
   fs.mkdirSync(path.join(rootDir, "data"));
   fs.writeFileSync(path.join(rootDir, "data", "fixture.json"), JSON.stringify({ synthetic: true }));
+  fs.writeFileSync(path.join(rootDir, "data", "spartan-incubator.fixture.json"), JSON.stringify({ __synthetic: true }));
   fs.writeFileSync(path.join(rootDir, "app.js"), "window.privateDashboard=true;");
+  fs.writeFileSync(path.join(rootDir, "server.js"), "SERVER SOURCE MUST NOT BE SERVED");
+  fs.writeFileSync(path.join(rootDir, "package.json"), "{\"private\":true}");
   const server = createApp({ rootDir, username: USERNAME, password: PASSWORD, sessionSecret: SECRET, ...options });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
@@ -42,7 +45,7 @@ test("health is minimal while dashboard, scripts, fixture data, and deep links d
   const health = await fetch(`${origin}/healthz`);
   assert.equal(health.status, 200);
   assert.deepEqual(await health.json(), { status: "ok" });
-  for (const route of ["/", "/app.js", "/data/fixture.json", "/service/spartan-incubator"]) {
+  for (const route of ["/", "/data/spartan-incubator.fixture.json", "/service/spartan-incubator"]) {
     const response = await fetch(`${origin}${route}`, { redirect: "manual" });
     assert.equal(response.status, 303, route);
     assert.match(response.headers.get("location"), /^\/login\?next=/, route);
@@ -68,15 +71,24 @@ test("valid signed session serves dashboard, assets, fixture, HEAD, and SPA deep
   const dashboard = await fetch(`${origin}/`, { headers: { Cookie: cookie } });
   assert.equal(dashboard.status, 200);
   assert.match(await dashboard.text(), /PRIVATE DASHBOARD MARKER/);
-  const script = await fetch(`${origin}/app.js`, { headers: { Cookie: cookie } });
-  assert.match(await script.text(), /privateDashboard/);
-  const data = await fetch(`${origin}/data/fixture.json`, { headers: { Cookie: cookie } });
-  assert.deepEqual(await data.json(), { synthetic: true });
+  const data = await fetch(`${origin}/data/spartan-incubator.fixture.json`, { headers: { Cookie: cookie } });
+  assert.deepEqual(await data.json(), { __synthetic: true });
   const deepLink = await fetch(`${origin}/service/spartan-incubator`, { headers: { Cookie: cookie } });
   assert.match(await deepLink.text(), /PRIVATE DASHBOARD MARKER/);
   const head = await fetch(`${origin}/`, { method: "HEAD", headers: { Cookie: cookie } });
   assert.equal(head.status, 200);
   assert.equal(await head.text(), "");
+});
+
+test("authenticated delivery serves only approved public assets, never repository or hidden files", async t => {
+  const origin = await fixture(t);
+  const { cookie } = await signIn(origin);
+  for (const route of ["/server.js", "/package.json", "/docs/RELEASE-HANDOFF.md", "/.env", "/.git/config", "/data/fixture.json"]) {
+    const response = await fetch(`${origin}${route}`, { headers: { Cookie: cookie }, redirect: "manual" });
+    assert.equal(response.status, 404, route);
+    const body = await response.text();
+    assert.doesNotMatch(body, /SERVER SOURCE|private|PRIVATE DASHBOARD MARKER|synthetic/i, route);
+  }
 });
 
 test("tampered and expired sessions are rejected", async t => {
