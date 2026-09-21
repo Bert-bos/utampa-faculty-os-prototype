@@ -2,6 +2,12 @@
 
 This repository owns a standalone, server-enforced Google identity boundary around the UTampa dashboard. It does not require the BOS or Entrepreneurship Professor runtime to authenticate or serve UTampa. BOS and EP remain optional navigation destinations and may be older or unavailable.
 
+## Owner-confirmed account boundary — September 21, 2026
+
+Bert explicitly requires `bert@bertseither.com`, his personal Google account, for private dashboard sign-in. Never request or use University accounts or institutional SSO for this dashboard. The prior University-account requirement was incorrect and is superseded by this owner instruction. `UTAMPA_ALLOWED_EMAIL` must allow only `bert@bertseither.com`; the variable name identifies the dashboard, not an institutional identity requirement.
+
+Personal sign-in does not authorize University/student data access. Student records, Canvas, Workday and other protected institutional information remain excluded. Calendar and Drive connections, when implemented, must use separately authorized read-only access and approved sources under Bert's personal account.
+
 ## Data and feature boundary
 
 - The committed Spartan Incubator file is synthetic demonstration data, not live University, student, founder, or FERPA data.
@@ -11,12 +17,12 @@ This repository owns a standalone, server-enforced Google identity boundary arou
 
 ## Required protected configuration
 
-Set these values in the deployment provider; never commit their values:
+Set these values in the deployment provider; never commit credentials or secret values:
 
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET` (minimum 12 characters)
 - `GOOGLE_REDIRECT_URI` (the exact HTTPS callback URL ending in `/auth/google/callback`)
-- `UTAMPA_ALLOWED_EMAIL` (Bert's exact authorized University Google account)
+- `UTAMPA_ALLOWED_EMAIL` (`bert@bertseither.com` only; Bert's owner-confirmed personal Google account)
 - `UTAMPA_SESSION_SECRET` (minimum 32 characters, randomly generated)
 - `NODE_ENV=production`
 
@@ -29,8 +35,8 @@ The service refuses to start if any required configuration is absent or too shor
 1. Preserve current live/rollback revision `b8d8df88`; deployment `dep-dafi6d0u01pc73aihnn0`.
 2. Require exact-head CI PASS, exact synthetic OAuth browser evidence, and independent technical/security PASS.
 3. Require exact-successor CREATIVE PASS for the branded Google sign-in/error surface and disabled BOS switcher state.
-4. Freeze the current static site's auto-deploy before merge. Provision a distinct single-instance Node web service with auto-deploy off and `npm start`; the current static runtime cannot enforce authentication.
-5. Configure the five protected environment values. Confirm the Google OAuth client allows only the exact production redirect URI and authorized University account. Do not expose secrets in logs or evidence.
+4. Reuse the existing single-instance Node web service `utampa-faculty-os-prod` (`srv-danbinjbc2fs73drgrqg`) with auto-deploy off and `npm start`. Do not provision a duplicate service or serve protected dashboard content from a public static runtime.
+5. Configure the five protected environment values. Use a dedicated dashboard OAuth client with the exact production redirect URI. Enforce the owner-confirmed personal account `bert@bertseither.com` through the server's exact email allowlist; Google consent-screen audience settings do not replace this application check. Do not expose secrets in logs or evidence.
 6. Only after explicit protected release authorization, deploy the exact reviewed revision.
 7. Verify exact deployment identity; public `/healthz`; unauthenticated denial of root/assets/data/deep links; successful Google sign-in; wrong-account/default-deny behavior; session expiry/tamper denial; POST logout and replay denial; desktop, 390px, and 375px Service/Spartan workflow; synthetic/no-data labels; and fail-safe sibling navigation.
 8. Record the provider deployment ID and commit. Roll back by routing to the preserved `b8d8df88` static service if any gate fails.
