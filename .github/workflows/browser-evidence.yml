@@ -110,7 +110,8 @@ jobs:
                 await page.goto(base + '/login', { waitUntil: 'domcontentloaded' });
                 const state = await shot(page, name, 'unauthenticated-entry');
                 assert(/continue with google/i.test(state.text), name + ' Google identity entry');
-                assert(/synthetic demonstration data only/i.test(state.text), name + ' provenance label');
+                assert(/^My Work Login/m.test(state.text), name + ' neutral login label');
+                assert(!/University of Tampa|Faculty OS/i.test(state.text), name + ' no University branding');
                 assert(state.geometry.scrollWidth <= state.geometry.clientWidth, name + ' overflow');
                 const buttonHeight = await page.locator('[data-testid=google-sign-in]').evaluate(node => node.getBoundingClientRect().height);
                 assert(buttonHeight >= 44, name + ' touch target');
