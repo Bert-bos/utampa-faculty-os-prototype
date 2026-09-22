@@ -78,11 +78,13 @@ test("startup fails closed when OAuth or session configuration is absent or weak
   assert.throws(() => createApp({ ...base, sessionSecret: "short" }), /UTAMPA_SESSION_SECRET/);
 });
 
-test("sign-in surface is branded, accessible, touch-sized, and contains no local credentials", async t => {
+test("sign-in surface is neutral, accessible, touch-sized, and contains no local credentials", async t => {
   const { origin } = await fixture(t);
   const normal = await fetch(`${origin}/login?next=%2Fservice%2Fspartan-incubator`);
   const body = await normal.text();
-  assert.match(body, /University of Tampa/);
+  assert.match(body, /<title>My Work Login<\/title>/);
+  assert.match(body, /<h1>My Work Login<\/h1>/);
+  assert.doesNotMatch(body, /University of Tampa|Faculty OS|<img|<svg/i);
   assert.match(body, /Continue with Google/);
   assert.match(body, /min-height:48px/);
   assert.match(body, /google:focus-visible/);
