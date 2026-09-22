@@ -21,6 +21,10 @@
       ? { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
       : { hour: "numeric", minute: "2-digit" }).format(date);
   }
+  function tabPage(tab) {
+    var label = Array.prototype.find.call(tab.childNodes, function (node) { return node.nodeType === 3 && node.textContent.trim(); });
+    return label ? label.textContent.trim() : tab.textContent.replace(/[0-9]/g, "").replace(/^[^A-Za-z]+/, "").trim();
+  }
   async function requestJson(path) {
     var response = await fetch(path, { credentials: "same-origin", headers: { Accept: "application/json" } });
     var body = await response.json().catch(function () { return {}; });
@@ -215,11 +219,11 @@
     var prepare = event.target.closest("[data-prepare-event]");
     if (prepare) { event.preventDefault(); prepareEvent(prepare.dataset.prepareEvent); return; }
     var tab = event.target.closest(".sectionTabs button");
-    if (tab) { var page = tab.textContent.replace(/[0-9]/g, "").trim(); setTimeout(function () { showManagedView(page); }, 60); }
+    if (tab) { var page = tabPage(tab); setTimeout(function () { showManagedView(page); }, 60); }
   });
   var observer = new MutationObserver(function () {
     wireHeader(); applyTaskState(); document.querySelectorAll(".drawer:not(.ut-live-drawer)").forEach(enhanceTaskDrawer);
-    var active = document.querySelector(".sectionTabs button.active"); if (active && !document.querySelector(".ut-live-view,.ut-calendar-panel")) setTimeout(function () { showManagedView(active.textContent.replace(/[0-9]/g, "").trim()); }, 0);
+    var active = document.querySelector(".sectionTabs button.active"); if (active && !document.querySelector(".ut-live-view,.ut-calendar-panel")) setTimeout(function () { showManagedView(tabPage(active)); }, 0);
   });
   function start() { wireHeader(); applyTaskState(); observer.observe(document.body, { childList: true, subtree: true }); setTimeout(function () { showManagedView("Today"); }, 80); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start); else start();
