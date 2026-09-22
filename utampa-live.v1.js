@@ -198,8 +198,9 @@
   }
   function updateActionCount() {
     var count = Object.keys(state).length;
-    document.querySelectorAll(".ut-actions-count").forEach(function (node) { node.textContent = count ? " (" + count + ")" : ""; });
-    document.querySelectorAll(".ut-mobile-actions-center").forEach(function (button) { button.textContent = "Actions" + (count ? " (" + count + ")" : ""); });
+    var countText = count ? " (" + count + ")" : "";
+    document.querySelectorAll(".ut-actions-count").forEach(function (node) { if (node.textContent !== countText) node.textContent = countText; });
+    document.querySelectorAll(".ut-mobile-actions-center").forEach(function (button) { var label = "Actions" + countText; if (button.textContent !== label) button.textContent = label; });
   }
   function actionRecordMarkup(title, record) {
     var status = String(record.status || "saved");
