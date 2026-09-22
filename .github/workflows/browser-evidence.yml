@@ -153,7 +153,8 @@ jobs:
                 const page = await browser.newPage({ viewport: { width, height } });
                 await routeAuthorizedSources(page);
                 await login(page);
-                await page.waitForSelector('.ut-live-view .ut-event');
+                await page.waitForSelector('.todayDirective');
+                await page.waitForSelector('.ut-source-status[data-page="Today"]');
                 const state = await shot(page, name, 'authenticated-synthetic-oidc');
                 assert(state.geometry.scrollWidth <= state.geometry.clientWidth, name + ' overflow');
                 const bos = page.locator('[data-cc-workspace="bos"]');
@@ -167,9 +168,9 @@ jobs:
                   evidence.screenshots.push('15-dashboard-switcher-keyboard-focus-mobile-390.png');
                 }
                 const bodyText = await page.locator('body').innerText();
-                state.liveAuthorizedView = /ENT 330 · Venture Validation/.test(bodyText) && /Google Calendar \+ Google Drive metadata · read-only/.test(bodyText);
-                assert(state.liveAuthorizedView, name + ' authorized read-only source view');
-                assert(!/Check engagement concerns|Two students need/i.test(bodyText), name + ' old protected-looking fixture hidden');
+                state.nativeWorkspace = /Prepare class, unblock the Incubator, then move research forward/.test(bodyText) && /PROTOTYPE DECISION WORKSPACE/.test(bodyText);
+                assert(state.nativeWorkspace, name + ' native Today workspace and provenance');
+                assert(await page.locator('.ut-live-view').count() === 0, name + ' generic Calendar/Drive replacement absent');
                 await page.close();
               }
 
@@ -195,12 +196,24 @@ jobs:
               const service = await browser.newPage({ viewport: { width: 390, height: 844 } });
               await routeAuthorizedSources(service, { events: [{ id: 'event-service', title: 'Spartan Incubator mentor review', start: '2026-09-24T16:00:00Z', end: '2026-09-24T17:00:00Z', url: 'https://calendar.google.com/calendar/event?eid=service', allDay: false }], files: [{ id: 'file-service', name: 'Spartan Incubator mentor notes', mimeType: 'application/vnd.google-apps.document', modifiedTime: '2026-09-22T15:00:00Z', url: 'https://drive.google.com/open?id=service' }] });
               await login(service);
+              await service.locator('.sectionTabs button', { hasText: 'Teaching' }).click();
+              await service.waitForSelector('.focusCourse');
+              assert(/SOURCE-LINKED PROTOTYPE/.test(await service.locator('.ut-source-status').innerText()), 'Teaching source state');
+              await service.locator('.sectionTabs button', { hasText: 'Research' }).click();
+              await service.waitForSelector('.pipeline');
+              assert(/Research workflow is not connected/.test(await service.locator('.ut-source-status').innerText()), 'Research source state');
               await service.locator('.sectionTabs button', { hasText: 'Service' }).click();
-              await service.waitForSelector('.ut-live-view .ut-event');
-              const serviceState = await shot(service, '11-service-authorized-live-workflow', 'authenticated-service-workflow');
-              serviceState.liveServiceVisible = /Spartan Incubator mentor review/.test(await service.locator('body').innerText());
-              assert(serviceState.liveServiceVisible, 'Service authorized live content');
-              await service.locator('.ut-mobile-prepare').click();
+              await service.waitForSelector('.serviceTopGrid');
+              const serviceState = await shot(service, '11-page-specific-workspaces', 'authenticated-page-specific-workspaces');
+              serviceState.nativeServiceVisible = /SAMPLE \/ PROTOTYPE DATA/.test(await service.locator('.ut-source-status').innerText());
+              assert(serviceState.nativeServiceVisible, 'Service native workspace and source state');
+              await service.locator('.sectionTabs button', { hasText: 'People' }).click();
+              await service.waitForSelector('.peopleWorkspace');
+              assert(/No directory, contacts, or student system is connected/.test(await service.locator('.ut-source-status').innerText()), 'People data boundary');
+              await service.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await service.waitForSelector('.ut-calendar-panel .ut-event');
+              assert(/Spartan Incubator mentor review/.test(await service.locator('.ut-calendar-panel').innerText()), 'Calendar authorized live content');
+              await service.locator('.ut-calendar-panel .ut-mobile-prepare').click();
               await service.waitForSelector('.ut-live-drawer .ut-file');
               assert(/Spartan Incubator mentor notes/.test(await service.locator('.ut-live-drawer').innerText()), 'Prepare Me related Drive source');
               await service.close();
@@ -208,23 +221,25 @@ jobs:
               const noData = await browser.newPage({ viewport: { width: 390, height: 844 } });
               await routeAuthorizedSources(noData, { events: [], files: [] });
               await login(noData);
-              await noData.waitForFunction(() => document.body.innerText.includes('No matching authorized calendar events.'));
-              const noDataState = await shot(noData, '12-authorized-empty-state', 'authenticated-authorized-empty');
+              await noData.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await noData.waitForFunction(() => document.body.innerText.includes('No events found'));
+              const noDataState = await shot(noData, '12-calendar-authorized-empty-state', 'authenticated-authorized-empty');
               const noDataText = await noData.locator('body').innerText();
-              noDataState.emptyStateVisible = noDataText.includes('No matching authorized calendar events.') && noDataText.includes('No matching authorized Drive files.');
-              assert(noDataState.emptyStateVisible, 'authorized empty sources explained');
+              noDataState.emptyStateVisible = noDataText.includes('No events found') && noDataText.includes('selected personal Google calendars');
+              assert(noDataState.emptyStateVisible, 'authorized Calendar empty source explained');
               await noData.close();
 
               const verifiedZero = await browser.newPage({ viewport: { width: 390, height: 844 } });
               await routeAuthorizedSources(verifiedZero);
               await login(verifiedZero);
               await verifiedZero.locator('.sectionTabs button', { hasText: 'People' }).click();
-              await verifiedZero.waitForFunction(() => document.body.innerText.includes('No authorized people source connected'));
+              await verifiedZero.waitForSelector('.peopleWorkspace');
+              await verifiedZero.waitForFunction(() => document.body.innerText.includes('No directory, contacts, or student system is connected'));
               const zeroState = await shot(verifiedZero, '13-people-protected-boundary-empty', 'authenticated-protected-boundary');
               const zeroText = await verifiedZero.locator('body').innerText();
-              zeroState.peopleBoundaryVisible = zeroText.includes('No authorized people source connected') && zeroText.includes('student records') && zeroText.includes('intentionally excluded');
-              assert(zeroState.peopleBoundaryVisible, 'People boundary and legitimate empty state');
-              await verifiedZero.locator('.ut-open-search').click();
+              zeroState.peopleBoundaryVisible = zeroText.includes('No directory, contacts, or student system is connected') && zeroText.includes('source-needed are not verified');
+              assert(zeroState.peopleBoundaryVisible, 'People boundary and provenance state');
+              await verifiedZero.locator('.ut-source-status .ut-mobile-search').click();
               await verifiedZero.locator('#ut-search-input').fill('ENT 330');
               await verifiedZero.locator('.ut-search-form button').click();
               await verifiedZero.waitForSelector('.ut-search-results .ut-event');

@@ -100,34 +100,45 @@
       content.querySelector(".ut-retry").addEventListener("click", showCalendarPanel);
     }
   }
-  function actionHistoryMarkup() {
-    var items = Object.keys(state).map(function (title) { return { title: title, record: state[title] }; }).sort(function (left, right) { return String(right.record.updatedAt).localeCompare(String(left.record.updatedAt)); });
-    if (!items.length) return '<div class="ut-empty"><h3>No saved decisions yet</h3><p>Complete, route, or dismiss an item and the decision will persist privately in this browser.</p></div>';
-    return '<div class="ut-action-history">' + items.slice(0, 10).map(function (item) { return '<article class="ut-file"><div><h3>' + escapeHtml(item.title) + '</h3><p>' + escapeHtml(item.record.status) + (item.record.target ? ' · ' + escapeHtml(item.record.target) : '') + '</p></div><time>' + escapeHtml(formatDate(item.record.updatedAt, true)) + '</time></article>'; }).join("") + '</div>';
+  function restoreNativeView() {
+    document.body.classList.remove("ut-live-managed", "ut-live-calendar");
+    document.querySelectorAll(".ut-live-view,.ut-calendar-panel").forEach(function (node) { node.remove(); });
   }
-  async function showManagedView(page) {
-    if (page === "Calendar") return showCalendarPanel();
-    document.body.classList.add("ut-live-managed"); document.body.classList.remove("ut-live-calendar");
-    var shell = document.querySelector(".topShell"); if (!shell) return;
-    var old = shell.querySelector(".ut-live-view,.ut-calendar-panel"); if (old) old.remove();
-    var view = document.createElement("section"); view.className = "ut-live-view";
-    var descriptions = { Today: "Your next authorized calendar commitments, recent Drive sources, and saved decisions.", Teaching: "Teaching-related items found in your personal Google Calendar and Drive metadata.", Research: "Research-related items found in your personal Google Calendar and Drive metadata.", Service: "Spartan Incubator and service-related items found in your personal Google sources.", People: "No contacts or student-record source is connected. Search remains limited to Calendar and Drive metadata." };
-    view.innerHTML = '<div class="ut-panel-head"><div><p class="eyebrow">AUTHORIZED PERSONAL GOOGLE SOURCES</p><h2>' + escapeHtml(page) + '</h2><span>' + escapeHtml(descriptions[page] || "Authorized live data") + '</span></div><button class="ut-refresh">Refresh</button></div>' + mobileActionsMarkup() + '<div class="ut-managed-content"><div class="ut-loading">Loading authorized data…</div></div>';
-    shell.prepend(view); view.querySelector(".ut-refresh").addEventListener("click", function () { showManagedView(page); }); wireMobileActions(view);
-    var content = view.querySelector(".ut-managed-content");
-    if (page === "People") {
-      content.innerHTML = '<div class="ut-empty"><h3>No authorized people source connected</h3><p>Google Contacts, University directories, Canvas, student records, and institutional systems are intentionally excluded. Use Search for calendar events or Drive files instead.</p><button class="ut-open-search">Search authorized sources</button></div>';
-      content.querySelector(".ut-open-search").addEventListener("click", showSearch); return;
+  function sourceStatus(page) {
+    return {
+      Today: ["PROTOTYPE DECISION WORKSPACE", "Ranking and work items are prototype content until an approved work-item feed is connected."],
+      Teaching: ["SOURCE-LINKED PROTOTYPE", "Course workspace only. Canvas and student systems are not connected; synthetic student examples remain clearly labeled."],
+      Research: ["SOURCE-LINKED PROTOTYPE", "Research workflow is not connected to a verified live project feed yet."],
+      Service: ["SAMPLE / PROTOTYPE DATA", "Service workflows are not connected to the private founder or student records. Treat names and metrics as illustrative."],
+      People: ["MIXED PROTOTYPE · VERIFY BEFORE USE", "No directory, contacts, or student system is connected. Entries marked source-needed are not verified."]
+    }[page];
+  }
+  function showNativeStatus(page) {
+    restoreNativeView();
+    var shell = document.querySelector(".topShell");
+    var status = sourceStatus(page);
+    if (!shell || !status) return;
+    var banner = shell.querySelector(".ut-source-status");
+    if (!banner) {
+      banner = document.createElement("section");
+      banner.className = "ut-source-status";
+      shell.prepend(banner);
     }
-    var query = { Today: "", Teaching: "ENT", Research: "research", Service: "Spartan" }[page] || "";
-    try {
-      var results = await Promise.all([loadCalendar(), requestJson("/api/drive?q=" + encodeURIComponent(query))]);
-      if (results.some(function (item) { return item.reauthorize; })) return void (content.innerHTML = reconnectMarkup());
-      var terms = { Teaching: /ENT|class|course|office hours|teaching/i, Research: /research|manuscript|analysis|study|IRB/i, Service: /Spartan|incubator|mentor|service|LEC/i }[page];
-      var events = terms ? results[0].events.filter(function (item) { return terms.test(item.title); }) : results[0].events;
-      var files = results[1].files || [];
-      content.innerHTML = '<div class="ut-managed-grid"><section><h3>Calendar</h3>' + (events.length ? '<div class="ut-event-list">' + events.slice(0, 12).map(eventMarkup).join("") + '</div>' : '<div class="ut-empty"><p>No matching authorized calendar events.</p></div>') + '</section><section><h3>Recent Drive files</h3>' + (files.length ? '<div class="ut-file-list">' + files.slice(0, 10).map(fileMarkup).join("") + '</div>' : '<div class="ut-empty"><p>No matching authorized Drive files.</p></div>') + '</section></div>' + (page === "Today" ? '<section class="ut-decisions"><h3>Saved decisions</h3>' + actionHistoryMarkup() + '</section>' : '') + '<p class="ut-source">Sources: Google Calendar + Google Drive metadata · read-only</p>';
-    } catch (_) { content.innerHTML = '<div class="ut-empty"><h3>Authorized sources are temporarily unavailable</h3><p>Nothing was changed. Refresh to try again.</p></div>'; }
+    banner.dataset.page = page;
+    banner.innerHTML = '<div><strong>' + escapeHtml(status[0]) + '</strong><span>' + escapeHtml(status[1]) + '</span></div>' + mobileActionsMarkup();
+    wireMobileActions(banner);
+  }
+  function syncActivePage() {
+    var active = document.querySelector(".sectionTabs button.active");
+    if (!active) return;
+    var page = tabPage(active);
+    if (page === "Calendar") {
+      var nativeCalendar = document.querySelector(".topShell .calendarHeader,.topShell .gcal");
+      if (nativeCalendar && !document.querySelector(".ut-calendar-panel")) showCalendarPanel();
+    } else {
+      var status = document.querySelector('.ut-source-status[data-page="' + page + '"]');
+      if (!status) showNativeStatus(page);
+    }
   }
   async function prepareEvent(title) {
     var drawer = loadingDrawer("Prepare Me · " + title);
@@ -220,12 +231,12 @@
     var prepare = event.target.closest("[data-prepare-event]");
     if (prepare) { event.preventDefault(); prepareEvent(prepare.dataset.prepareEvent); return; }
     var tab = event.target.closest(".sectionTabs button");
-    if (tab) { var page = tabPage(tab); setTimeout(function () { showManagedView(page); }, 60); }
+    if (tab) { setTimeout(syncActivePage, 60); }
   });
   var observer = new MutationObserver(function () {
     wireHeader(); applyTaskState(); document.querySelectorAll(".drawer:not(.ut-live-drawer)").forEach(enhanceTaskDrawer);
-    var active = document.querySelector(".sectionTabs button.active"); if (active && !document.querySelector(".ut-live-view,.ut-calendar-panel")) setTimeout(function () { showManagedView(tabPage(active)); }, 0);
+    setTimeout(syncActivePage, 0);
   });
-  function start() { wireHeader(); applyTaskState(); observer.observe(document.body, { childList: true, subtree: true }); setTimeout(function () { showManagedView("Today"); }, 80); }
+  function start() { wireHeader(); applyTaskState(); observer.observe(document.body, { childList: true, subtree: true }); setTimeout(syncActivePage, 80); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start); else start();
 }());
