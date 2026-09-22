@@ -199,8 +199,21 @@
     var shade = document.querySelector(".drawerShade:not(.ut-live-shade)");
     if (shade) shade.remove();
     var toast = document.createElement("div"); toast.className = "toast ut-toast";
-    toast.textContent = status === "routed" ? "✓ Routed to " + target : status === "completed" ? "✓ Completed" : "✓ Dismissed";
+    toast.textContent = status === "routed" ? "✓ Routed to " + target : status === "completed" ? "✓ Completed" : status === "staged" ? "✓ Staged for review" : "✓ Dismissed";
     document.body.appendChild(toast); setTimeout(function () { toast.remove(); }, 2400);
+  }
+  function stageExternalAction(button) {
+    var label = button.textContent.trim();
+    var container = button.closest(".drawer,.founderPortal");
+    if (!container) return false;
+    var heading = container.querySelector("h2");
+    var title = heading ? heading.textContent.trim() : label;
+    state["External review · " + title] = { status: "staged", target: label, updatedAt: new Date().toISOString() };
+    writeState();
+    var shade = container.closest(".drawerShade,.portalShade");
+    if (shade) shade.remove();
+    openDrawer("Staged for review", '<div class="ut-brief"><strong>Nothing was sent or submitted</strong><p>This draft is saved only in this browser for your review. Email, Canvas, student systems, and founder systems are not connected.</p></div><p class="ut-source">Prototype-safe action boundary</p>');
+    return true;
   }
   function enhanceTaskDrawer(drawer) {
     if (drawer.classList.contains("ut-live-drawer") || drawer.querySelector(".ut-action-controls")) return;
@@ -227,6 +240,12 @@
     var profile = tools.querySelector(".profile");
     if (profile && !profile.dataset.liveWired) { profile.dataset.liveWired = "1"; profile.addEventListener("click", function (event) { event.preventDefault(); event.stopImmediatePropagation(); showAccount(); }, true); }
   }
+  document.addEventListener("click", function (event) {
+    var actionButton = event.target.closest("button");
+    if (actionButton && /^(Send…|Send\.\.\.|Share with founder|Submit update)$/i.test(actionButton.textContent.trim()) && stageExternalAction(actionButton)) {
+      event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); return;
+    }
+  }, true);
   document.addEventListener("click", function (event) {
     var prepare = event.target.closest("[data-prepare-event]");
     if (prepare) { event.preventDefault(); prepareEvent(prepare.dataset.prepareEvent); return; }

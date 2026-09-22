@@ -193,6 +193,21 @@ jobs:
               assert(!/Spartan Incubator Service/i.test(replayState.text), 'revoked session disclosed no dashboard');
               await replay.close();
 
+              const actions = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(actions);
+              await login(actions);
+              await actions.waitForSelector('.todayDirective');
+              const firstTask = actions.locator('.todayTask', { hasText: 'Review next-class deck' });
+              await firstTask.click();
+              await actions.waitForSelector('.drawer .ut-action-controls');
+              await actions.locator('.drawer .ut-complete').click();
+              assert(await firstTask.isHidden(), 'completed Today item leaves active list');
+              await actions.reload({ waitUntil: 'domcontentloaded' });
+              await actions.waitForSelector('.todayDirective');
+              assert(await actions.locator('.todayTask', { hasText: 'Review next-class deck' }).isHidden(), 'completed Today item persists after reload');
+              await shot(actions, '11-today-action-completion-persists', 'authenticated-local-action-state');
+              await actions.close();
+
               const service = await browser.newPage({ viewport: { width: 390, height: 844 } });
               await routeAuthorizedSources(service, { events: [{ id: 'event-service', title: 'Spartan Incubator mentor review', start: '2026-09-24T16:00:00Z', end: '2026-09-24T17:00:00Z', url: 'https://calendar.google.com/calendar/event?eid=service', allDay: false }], files: [{ id: 'file-service', name: 'Spartan Incubator mentor notes', mimeType: 'application/vnd.google-apps.document', modifiedTime: '2026-09-22T15:00:00Z', url: 'https://drive.google.com/open?id=service' }] });
               await login(service);
@@ -208,9 +223,15 @@ jobs:
               await service.locator('.sectionTabs button', { hasText: 'Service' }).click();
               await service.waitForSelector('.serviceTopGrid');
               await service.waitForSelector('.ut-source-status[data-page="Service"]');
-              const serviceState = await shot(service, '11-page-specific-workspaces', 'authenticated-page-specific-workspaces');
+              const serviceState = await shot(service, '12-page-specific-workspaces', 'authenticated-page-specific-workspaces');
               serviceState.nativeServiceVisible = /SAMPLE \/ PROTOTYPE DATA/.test(await service.locator('.ut-source-status').innerText());
               assert(serviceState.nativeServiceVisible, 'Service native workspace and source state');
+              await service.getByRole('button', { name: 'Share with founder', exact: true }).first().click();
+              await service.waitForSelector('.reviewModal');
+              await service.locator('.reviewModal').getByRole('button', { name: 'Share with founder', exact: true }).click();
+              await service.waitForSelector('.ut-live-drawer');
+              assert(/Nothing was sent or submitted/.test(await service.locator('.ut-live-drawer').innerText()), 'external action stopped at local review boundary');
+              await service.locator('.ut-live-drawer .drawerClose').click();
               await service.locator('.sectionTabs button', { hasText: 'People' }).click();
               await service.waitForSelector('.peopleWorkspace');
               await service.waitForSelector('.ut-source-status[data-page="People"]');
@@ -229,7 +250,7 @@ jobs:
               await noData.waitForSelector('.todayDirective');
               await noData.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
               await noData.waitForFunction(() => document.body.innerText.includes('No events found'));
-              const noDataState = await shot(noData, '12-calendar-authorized-empty-state', 'authenticated-authorized-empty');
+              const noDataState = await shot(noData, '13-calendar-authorized-empty-state', 'authenticated-authorized-empty');
               const noDataText = await noData.locator('body').innerText();
               noDataState.emptyStateVisible = noDataText.includes('No events found') && noDataText.includes('selected personal Google calendars');
               assert(noDataState.emptyStateVisible, 'authorized Calendar empty source explained');
@@ -242,7 +263,7 @@ jobs:
               await verifiedZero.locator('.sectionTabs button', { hasText: 'People' }).click();
               await verifiedZero.waitForSelector('.peopleWorkspace');
               await verifiedZero.waitForFunction(() => document.body.innerText.includes('No directory, contacts, or student system is connected'));
-              const zeroState = await shot(verifiedZero, '13-people-protected-boundary-empty', 'authenticated-protected-boundary');
+              const zeroState = await shot(verifiedZero, '14-people-protected-boundary-empty', 'authenticated-protected-boundary');
               const zeroText = await verifiedZero.locator('body').innerText();
               zeroState.peopleBoundaryVisible = zeroText.includes('No directory, contacts, or student system is connected') && zeroText.includes('source-needed are not verified');
               assert(zeroState.peopleBoundaryVisible, 'People boundary and provenance state');
