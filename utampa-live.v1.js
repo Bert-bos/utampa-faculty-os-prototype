@@ -231,7 +231,10 @@
     var prepare = event.target.closest("[data-prepare-event]");
     if (prepare) { event.preventDefault(); prepareEvent(prepare.dataset.prepareEvent); return; }
     var tab = event.target.closest(".sectionTabs button");
-    if (tab) { setTimeout(syncActivePage, 60); }
+    if (tab) {
+      var page = tabPage(tab);
+      setTimeout(function () { if (page === "Calendar") showCalendarPanel(); else showNativeStatus(page); }, 60);
+    }
   });
   var observer = new MutationObserver(function () {
     wireHeader(); applyTaskState(); document.querySelectorAll(".drawer:not(.ut-live-drawer)").forEach(enhanceTaskDrawer);
