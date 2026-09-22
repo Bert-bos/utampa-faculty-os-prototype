@@ -197,7 +197,7 @@ jobs:
               const serviceState = await shot(service, '11-service-authorized-live-workflow', 'authenticated-service-workflow');
               serviceState.liveServiceVisible = /Spartan Incubator mentor review/.test(await service.locator('body').innerText());
               assert(serviceState.liveServiceVisible, 'Service authorized live content');
-              await service.locator('.prepareHeader').click();
+              await service.locator('.ut-mobile-prepare').click();
               await service.waitForSelector('.ut-live-drawer .ut-file');
               assert(/Spartan Incubator mentor notes/.test(await service.locator('.ut-live-drawer').innerText()), 'Prepare Me related Drive source');
               await service.close();
