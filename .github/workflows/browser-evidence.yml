@@ -8,6 +8,8 @@ on:
       - 'test/server.test.js'
       - 'cc-workspace-switcher.v2.js'
       - 'cc-incubator-adapter.v1.js'
+      - 'utampa-live.v1.js'
+      - 'utampa-live.v1.css'
       - 'index.html'
       - 'assets/**'
       - 'data/**'
