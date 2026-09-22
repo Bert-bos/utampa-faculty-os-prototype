@@ -47,6 +47,15 @@
     return shade;
   }
   function loadingDrawer(title) { return openDrawer(title, '<div class="ut-loading" role="status">Loading authorized data…</div>'); }
+  function mobileActionsMarkup() {
+    return '<div class="ut-mobile-actions" aria-label="Dashboard actions"><button class="ut-mobile-search">Search</button><button class="ut-mobile-prepare">Prepare me</button></div>';
+  }
+  function wireMobileActions(container) {
+    var search = container.querySelector(".ut-mobile-search");
+    var prepare = container.querySelector(".ut-mobile-prepare");
+    if (search) search.addEventListener("click", showSearch);
+    if (prepare) prepare.addEventListener("click", showPrepareMe);
+  }
   function eventMarkup(event) {
     var link = event.url ? '<a href="' + escapeHtml(event.url) + '" target="_blank" rel="noopener">Open in Google Calendar</a>' : "";
     return '<article class="ut-event"><div><time>' + escapeHtml(event.allDay ? "All day" : formatDate(event.start, true)) + '</time><h3>' + escapeHtml(event.title) + '</h3>' + (event.location ? '<p>' + escapeHtml(event.location) + '</p>' : "") + '</div><div class="ut-inline-actions"><button data-prepare-event="' + escapeHtml(event.title) + '">Prepare me</button>' + link + '</div></article>';
@@ -69,9 +78,10 @@
     if (!panel) {
       panel = document.createElement("section");
       panel.className = "ut-calendar-panel";
-      panel.innerHTML = '<div class="ut-panel-head"><div><p class="eyebrow">GOOGLE CALENDAR · READ-ONLY</p><h2>Calendar</h2><span>Authorized events from bert@bertseither.com. No University account or institutional system is connected.</span></div><button class="ut-refresh">Refresh</button></div><div class="ut-calendar-content"><div class="ut-loading">Loading authorized calendar…</div></div>';
+      panel.innerHTML = '<div class="ut-panel-head"><div><p class="eyebrow">GOOGLE CALENDAR · READ-ONLY</p><h2>Calendar</h2><span>Authorized events from bert@bertseither.com. No University account or institutional system is connected.</span></div><button class="ut-refresh">Refresh</button></div>' + mobileActionsMarkup() + '<div class="ut-calendar-content"><div class="ut-loading">Loading authorized calendar…</div></div>';
       shell.prepend(panel);
       panel.querySelector(".ut-refresh").addEventListener("click", showCalendarPanel);
+      wireMobileActions(panel);
     }
     var content = panel.querySelector(".ut-calendar-content");
     content.innerHTML = '<div class="ut-loading">Loading authorized calendar…</div>';
@@ -97,8 +107,8 @@
     var old = shell.querySelector(".ut-live-view,.ut-calendar-panel"); if (old) old.remove();
     var view = document.createElement("section"); view.className = "ut-live-view";
     var descriptions = { Today: "Your next authorized calendar commitments, recent Drive sources, and saved decisions.", Teaching: "Teaching-related items found in your personal Google Calendar and Drive metadata.", Research: "Research-related items found in your personal Google Calendar and Drive metadata.", Service: "Spartan Incubator and service-related items found in your personal Google sources.", People: "No contacts or student-record source is connected. Search remains limited to Calendar and Drive metadata." };
-    view.innerHTML = '<div class="ut-panel-head"><div><p class="eyebrow">AUTHORIZED PERSONAL GOOGLE SOURCES</p><h2>' + escapeHtml(page) + '</h2><span>' + escapeHtml(descriptions[page] || "Authorized live data") + '</span></div><button class="ut-refresh">Refresh</button></div><div class="ut-managed-content"><div class="ut-loading">Loading authorized data…</div></div>';
-    shell.prepend(view); view.querySelector(".ut-refresh").addEventListener("click", function () { showManagedView(page); });
+    view.innerHTML = '<div class="ut-panel-head"><div><p class="eyebrow">AUTHORIZED PERSONAL GOOGLE SOURCES</p><h2>' + escapeHtml(page) + '</h2><span>' + escapeHtml(descriptions[page] || "Authorized live data") + '</span></div><button class="ut-refresh">Refresh</button></div>' + mobileActionsMarkup() + '<div class="ut-managed-content"><div class="ut-loading">Loading authorized data…</div></div>';
+    shell.prepend(view); view.querySelector(".ut-refresh").addEventListener("click", function () { showManagedView(page); }); wireMobileActions(view);
     var content = view.querySelector(".ut-managed-content");
     if (page === "People") {
       content.innerHTML = '<div class="ut-empty"><h3>No authorized people source connected</h3><p>Google Contacts, University directories, Canvas, student records, and institutional systems are intentionally excluded. Use Search for calendar events or Drive files instead.</p><button class="ut-open-search">Search authorized sources</button></div>';
