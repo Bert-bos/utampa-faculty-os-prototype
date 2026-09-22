@@ -265,7 +265,6 @@
     var prepare = tools.querySelector(".prepareHeader");
     if (prepare && !prepare.dataset.liveWired) { prepare.dataset.liveWired = "1"; prepare.addEventListener("click", function (event) { event.preventDefault(); event.stopImmediatePropagation(); showPrepareMe(); }, true); }
     if (!tools.querySelector(".ut-search-button")) { var search = document.createElement("button"); search.className = "ut-search-button"; search.textContent = "Search"; search.addEventListener("click", showSearch); tools.insertBefore(search, prepare || tools.firstChild); }
-    if (!tools.querySelector(".ut-actions-button")) { var actions = document.createElement("button"); actions.className = "ut-actions-button"; actions.innerHTML = 'Actions<span class="ut-actions-count"></span>'; actions.addEventListener("click", showActionCenter); tools.insertBefore(actions, tools.querySelector(".ut-search-button") || prepare || tools.firstChild); updateActionCount(); }
     var profile = tools.querySelector(".profile");
     if (profile && !profile.dataset.liveWired) { profile.dataset.liveWired = "1"; profile.addEventListener("click", function (event) { event.preventDefault(); event.stopImmediatePropagation(); showAccount(); }, true); }
   }
