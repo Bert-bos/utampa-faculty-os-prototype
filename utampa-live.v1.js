@@ -52,11 +52,13 @@
   }
   function loadingDrawer(title) { return openDrawer(title, '<div class="ut-loading" role="status">Loading authorized data…</div>'); }
   function mobileActionsMarkup() {
-    return '<div class="ut-mobile-actions" aria-label="Dashboard actions"><button class="ut-mobile-search">Search</button><button class="ut-mobile-prepare">Prepare me</button></div>';
+    return '<div class="ut-mobile-actions" aria-label="Dashboard actions"><button class="ut-mobile-actions-center">Actions' + (Object.keys(state).length ? ' (' + Object.keys(state).length + ')' : '') + '</button><button class="ut-mobile-search">Search</button><button class="ut-mobile-prepare">Prepare me</button></div>';
   }
   function wireMobileActions(container) {
+    var actions = container.querySelector(".ut-mobile-actions-center");
     var search = container.querySelector(".ut-mobile-search");
     var prepare = container.querySelector(".ut-mobile-prepare");
+    if (actions) actions.addEventListener("click", showActionCenter);
     if (search) search.addEventListener("click", showSearch);
     if (prepare) prepare.addEventListener("click", showPrepareMe);
   }
@@ -192,6 +194,32 @@
       var record = state[title];
       button.hidden = Boolean(record && (record.status === "completed" || record.status === "dismissed" || record.status === "routed"));
     });
+    updateActionCount();
+  }
+  function updateActionCount() {
+    var count = Object.keys(state).length;
+    document.querySelectorAll(".ut-actions-count").forEach(function (node) { node.textContent = count ? " (" + count + ")" : ""; });
+    document.querySelectorAll(".ut-mobile-actions-center").forEach(function (button) { button.textContent = "Actions" + (count ? " (" + count + ")" : ""); });
+  }
+  function actionRecordMarkup(title, record) {
+    var status = String(record.status || "saved");
+    var detail = status.charAt(0).toUpperCase() + status.slice(1) + (record.target ? " · " + record.target : "");
+    return '<article class="ut-action-record" data-action-title="' + escapeHtml(title) + '"><div><h3>' + escapeHtml(title) + '</h3><p>' + escapeHtml(detail) + '</p><time>' + escapeHtml(formatDate(record.updatedAt, true)) + '</time></div><button class="ut-restore-action">Restore</button></article>';
+  }
+  function showActionCenter() {
+    var entries = Object.keys(state).map(function (title) { return { title: title, record: state[title] }; }).sort(function (left, right) { return String(right.record.updatedAt).localeCompare(String(left.record.updatedAt)); });
+    var body = entries.length
+      ? '<p class="ut-source">Private browser state only. Routing does not notify another person or system.</p><div class="ut-action-history">' + entries.map(function (item) { return actionRecordMarkup(item.title, item.record); }).join("") + '</div>'
+      : '<div class="ut-empty"><h3>No saved actions</h3><p>Completed, routed, dismissed, and staged items will appear here.</p></div>';
+    var drawer = openDrawer("Actions", body);
+    drawer.querySelectorAll(".ut-restore-action").forEach(function (button) {
+      button.addEventListener("click", function () {
+        var record = button.closest(".ut-action-record");
+        delete state[record.dataset.actionTitle];
+        writeState(); applyTaskState(); record.remove();
+        if (!drawer.querySelector(".ut-action-record")) drawer.querySelector(".ut-live-body").innerHTML = '<div class="ut-empty"><h3>No saved actions</h3><p>Completed, routed, dismissed, and staged items will appear here.</p></div>';
+      });
+    });
   }
   function saveAction(title, status, target) {
     state[title] = { status: status, target: target || "", updatedAt: new Date().toISOString() };
@@ -209,7 +237,7 @@
     var heading = container.querySelector("h2");
     var title = heading ? heading.textContent.trim() : label;
     state["External review · " + title] = { status: "staged", target: label, updatedAt: new Date().toISOString() };
-    writeState();
+    writeState(); updateActionCount();
     var shade = container.closest(".drawerShade,.portalShade");
     if (shade) shade.remove();
     openDrawer("Staged for review", '<div class="ut-brief"><strong>Nothing was sent or submitted</strong><p>This draft is saved only in this browser for your review. Email, Canvas, student systems, and founder systems are not connected.</p></div><p class="ut-source">Prototype-safe action boundary</p>');
@@ -237,6 +265,7 @@
     var prepare = tools.querySelector(".prepareHeader");
     if (prepare && !prepare.dataset.liveWired) { prepare.dataset.liveWired = "1"; prepare.addEventListener("click", function (event) { event.preventDefault(); event.stopImmediatePropagation(); showPrepareMe(); }, true); }
     if (!tools.querySelector(".ut-search-button")) { var search = document.createElement("button"); search.className = "ut-search-button"; search.textContent = "Search"; search.addEventListener("click", showSearch); tools.insertBefore(search, prepare || tools.firstChild); }
+    if (!tools.querySelector(".ut-actions-button")) { var actions = document.createElement("button"); actions.className = "ut-actions-button"; actions.innerHTML = 'Actions<span class="ut-actions-count"></span>'; actions.addEventListener("click", showActionCenter); tools.insertBefore(actions, tools.querySelector(".ut-search-button") || prepare || tools.firstChild); updateActionCount(); }
     var profile = tools.querySelector(".profile");
     if (profile && !profile.dataset.liveWired) { profile.dataset.liveWired = "1"; profile.addEventListener("click", function (event) { event.preventDefault(); event.stopImmediatePropagation(); showAccount(); }, true); }
   }

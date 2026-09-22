@@ -205,7 +205,18 @@ jobs:
               await actions.reload({ waitUntil: 'domcontentloaded' });
               await actions.waitForSelector('.todayDirective');
               assert(await actions.locator('.todayTask', { hasText: 'Review next-class deck' }).isHidden(), 'completed Today item persists after reload');
-              await shot(actions, '11-today-action-completion-persists', 'authenticated-local-action-state');
+              await actions.waitForSelector('.ut-source-status .ut-mobile-actions-center');
+              await actions.locator('.ut-source-status .ut-mobile-actions-center').click();
+              await actions.waitForSelector('.ut-action-record');
+              const actionState = await shot(actions, '11-action-center-review-and-restore', 'authenticated-local-action-state');
+              actionState.actionCenterVisible = /Review next-class deck/.test(await actions.locator('.ut-live-drawer').innerText()) && /Completed/.test(await actions.locator('.ut-live-drawer').innerText());
+              assert(actionState.actionCenterVisible, 'Action Center shows saved status');
+              await actions.locator('.ut-action-record', { hasText: 'Review next-class deck' }).locator('.ut-restore-action').click();
+              await actions.locator('.ut-live-drawer .drawerClose').click();
+              assert(await actions.locator('.todayTask', { hasText: 'Review next-class deck' }).isVisible(), 'restored Today item returns to active list');
+              await actions.reload({ waitUntil: 'domcontentloaded' });
+              await actions.waitForSelector('.todayDirective');
+              assert(await actions.locator('.todayTask', { hasText: 'Review next-class deck' }).isVisible(), 'restored Today item persists after reload');
               await actions.close();
 
               const service = await browser.newPage({ viewport: { width: 390, height: 844 } });
