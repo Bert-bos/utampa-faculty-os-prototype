@@ -99,7 +99,7 @@ test("sign-in surface is branded, accessible, touch-sized, and contains no local
   assert.match(errorBody, /\.focus\(\)/);
 });
 
-test("authorization uses state, nonce, PKCE, openid/email scopes, and an HttpOnly transaction cookie", async t => {
+test("authorization uses state, nonce, PKCE, minimum read-only Google scopes, and an HttpOnly transaction cookie", async t => {
   const { origin, oauth } = await fixture(t);
   const started = await begin(origin, "/service/spartan-incubator");
   assert.equal(started.response.status, 303);
@@ -223,10 +223,17 @@ test("Google provider verifies token signature and required claims", async () =>
   };
   const provider = createGoogleOAuthProvider({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: REDIRECT_URI, fetchImpl, now: () => now });
   const auth = new URL(provider.authorizationUrl({ state: "state", nonce: "expected-nonce", codeChallenge: "challenge" }));
-  assert.equal(auth.searchParams.get("scope"), "openid email");
+  assert.match(auth.searchParams.get("scope"), /openid/);
+  assert.match(auth.searchParams.get("scope"), /calendar\.readonly/);
+  assert.match(auth.searchParams.get("scope"), /drive\.metadata\.readonly/);
+  assert.equal(auth.searchParams.get("access_type"), "offline");
+  assert.equal(auth.searchParams.get("include_granted_scopes"), "true");
   assert.equal(auth.searchParams.get("code_challenge_method"), "S256");
   const identity = await provider.exchangeAndVerify({ code: "code", codeVerifier: "verifier", expectedNonce: "expected-nonce" });
-  assert.deepEqual(identity, { sub: claims.sub, email: claims.email });
+  assert.equal(identity.sub, claims.sub);
+  assert.equal(identity.email, claims.email);
+  assert.equal(identity.accessToken, "");
+  assert.equal(identity.refreshToken, "");
   assert.match(String(requests[0].options.body), /code_verifier=verifier/);
   await assert.rejects(() => provider.exchangeAndVerify({ code: "code", codeVerifier: "verifier", expectedNonce: "wrong" }), /claims rejected/);
 
@@ -240,6 +247,32 @@ test("Google provider verifies token signature and required claims", async () =>
       : new Response(JSON.stringify({ keys: [jwk] }), { status: 200, headers: { "content-type": "application/json" } })
   });
   await assert.rejects(() => conflictingProvider.exchangeAndVerify({ code: "code", codeVerifier: "verifier", expectedNonce: "expected-nonce" }), /claims rejected/);
+});
+
+test("authorized Calendar and Drive API routes proxy only read-only sanitized data", async t => {
+  const requests = [];
+  const oauth = fakeOAuth({
+    sub: "google-subject-123", email: ALLOWED_EMAIL, accessToken: "access-token", refreshToken: "refresh-token",
+    accessTokenExpiresAt: Date.now() + 3600000, grantedScope: "calendar.readonly drive.metadata.readonly"
+  });
+  const fetchImpl = async (url, options) => {
+    requests.push({ url: String(url), options });
+    if (String(url).includes("calendar")) return new Response(JSON.stringify({ items: [{ id: "event-1", summary: "ENT 330", description: "must not leak", start: { dateTime: "2026-09-22T16:00:00Z" }, end: { dateTime: "2026-09-22T17:00:00Z" }, htmlLink: "https://calendar.google.com/event" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({ files: [{ id: "file-1", name: "ENT 330 deck", mimeType: "application/vnd.google-apps.presentation", modifiedTime: "2026-09-22T12:00:00Z", webViewLink: "https://drive.google.com/file" }] }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const { origin } = await fixture(t, { oauth, fetchImpl });
+  const { sessionCookie } = await signIn(origin);
+  const calendar = await fetch(`${origin}/api/calendar`, { headers: { Cookie: sessionCookie } });
+  assert.equal(calendar.status, 200);
+  const calendarBody = await calendar.json();
+  assert.equal(calendarBody.events[0].title, "ENT 330");
+  assert.equal(calendarBody.events[0].description, undefined);
+  const drive = await fetch(`${origin}/api/drive?q=ENT%20330`, { headers: { Cookie: sessionCookie } });
+  assert.equal(drive.status, 200);
+  assert.equal((await drive.json()).files[0].name, "ENT 330 deck");
+  assert.ok(requests.every(request => request.options.headers.Authorization === "Bearer access-token"));
+  assert.match(requests[0].url, /fields=/);
+  assert.match(requests[1].url, /trashed/);
 });
 
 test("repository data contract stays synthetic and unknown is never coerced to zero", () => {

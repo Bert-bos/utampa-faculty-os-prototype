@@ -266,3 +266,17 @@
     render: render
   };
 })();
+
+(function loadAuthorizedLiveDataAdapter() {
+  if (!document.querySelector || !document.createElement || !document.head) return;
+  if (document.querySelector('script[data-utampa-live="1"]')) return;
+  var style = document.createElement("link");
+  style.rel = "stylesheet";
+  style.href = "/utampa-live.v1.css";
+  document.head.appendChild(style);
+  var script = document.createElement("script");
+  script.src = "/utampa-live.v1.js";
+  script.defer = true;
+  script.dataset.utampaLive = "1";
+  document.head.appendChild(script);
+}());

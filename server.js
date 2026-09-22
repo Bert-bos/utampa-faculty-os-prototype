@@ -17,6 +17,14 @@ const GOOGLE_ISSUERS = new Set(["accounts.google.com", "https://accounts.google.
 const GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const GOOGLE_JWKS_ENDPOINT = "https://www.googleapis.com/oauth2/v3/certs";
+const GOOGLE_CALENDAR_ENDPOINT = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
+const GOOGLE_DRIVE_ENDPOINT = "https://www.googleapis.com/drive/v3/files";
+const GOOGLE_SCOPES = [
+  "openid",
+  "email",
+  "https://www.googleapis.com/auth/calendar.readonly",
+  "https://www.googleapis.com/auth/drive.metadata.readonly"
+].join(" ");
 const CONTENT_TYPES = {
   ".css": "text/css; charset=utf-8", ".html": "text/html; charset=utf-8", ".ico": "image/x-icon",
   ".js": "text/javascript; charset=utf-8", ".json": "application/json; charset=utf-8", ".png": "image/png",
@@ -24,7 +32,8 @@ const CONTENT_TYPES = {
 };
 const ROOT_ASSETS = new Set([
   "index.html", "utampa-logo.svg", "favicon.svg", "cc-shell-responsive.v1.css", "cc-recorder.css",
-  "cc-workspace-switcher.v2.js", "cc-shell-shim.v1.js", "cc-recorder.js", "cc-incubator-adapter.v1.js"
+  "cc-workspace-switcher.v2.js", "cc-shell-shim.v1.js", "cc-recorder.js", "cc-incubator-adapter.v1.js",
+  "utampa-live.v1.js", "utampa-live.v1.css"
 ]);
 
 function required(name, value, minLength = 1) {
@@ -121,7 +130,11 @@ function createGoogleOAuthProvider(config) {
   return {
     authorizationUrl({ state, nonce, codeChallenge }) {
       const url = new URL(GOOGLE_AUTHORIZATION_ENDPOINT);
-      url.search = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: "code", scope: "openid email", state, nonce, code_challenge: codeChallenge, code_challenge_method: "S256", prompt: "select_account" });
+      url.search = new URLSearchParams({
+        client_id: clientId, redirect_uri: redirectUri, response_type: "code", scope: GOOGLE_SCOPES,
+        state, nonce, code_challenge: codeChallenge, code_challenge_method: "S256", access_type: "offline",
+        include_granted_scopes: "true", prompt: "consent select_account"
+      });
       return url.toString();
     },
     async exchangeAndVerify({ code, codeVerifier, expectedNonce }) {
@@ -149,7 +162,28 @@ function createGoogleOAuthProvider(config) {
           claims.email_verified !== true || typeof claims.email !== "string" || typeof claims.sub !== "string" || !claims.sub) {
         throw new Error("identity token claims rejected");
       }
-      return { sub: claims.sub, email: claims.email };
+      return {
+        sub: claims.sub,
+        email: claims.email,
+        accessToken: typeof token.access_token === "string" ? token.access_token : "",
+        refreshToken: typeof token.refresh_token === "string" ? token.refresh_token : "",
+        accessTokenExpiresAt: now() + Math.max(0, Number(token.expires_in || 0)) * 1000,
+        grantedScope: typeof token.scope === "string" ? token.scope : ""
+      };
+    },
+    async refresh(refreshToken) {
+      const response = await fetchImpl(GOOGLE_TOKEN_ENDPOINT, {
+        method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+        body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: "refresh_token" })
+      });
+      if (!response.ok) throw new Error("Google access refresh failed");
+      const token = await response.json();
+      if (typeof token.access_token !== "string" || !token.access_token) throw new Error("Google access token missing");
+      return {
+        accessToken: token.access_token,
+        accessTokenExpiresAt: now() + Math.max(0, Number(token.expires_in || 0)) * 1000,
+        grantedScope: typeof token.scope === "string" ? token.scope : ""
+      };
     }
   };
 }
@@ -160,7 +194,10 @@ function createSyntheticOAuthProvider() {
     authorizationUrl({ state, nonce }) { return `/__test/authorize?state=${encodeURIComponent(state)}&nonce=${encodeURIComponent(nonce)}`; },
     async exchangeAndVerify({ code, expectedNonce }) {
       if (code !== `synthetic:${expectedNonce}`) throw new Error("synthetic identity rejected");
-      return { sub: "synthetic-subject", email: "bert@utampa.edu" };
+      return { sub: "synthetic-subject", email: "bert@utampa.edu", accessToken: "synthetic-access-token", refreshToken: "synthetic-refresh-token", accessTokenExpiresAt: Date.now() + 3600000, grantedScope: GOOGLE_SCOPES };
+    },
+    async refresh() {
+      return { accessToken: "synthetic-refreshed-token", accessTokenExpiresAt: Date.now() + 3600000, grantedScope: GOOGLE_SCOPES };
     }
   };
 }
@@ -180,6 +217,32 @@ function createApp(options = {}) {
   const activeSessions = new Map();
   const pendingAuth = new Map();
   const authAttempts = new Map();
+
+  async function googleAccessToken(session) {
+    if (session.accessToken && session.accessTokenExpiresAt > now() + 60000) return session.accessToken;
+    if (!session.refreshToken || typeof oauth.refresh !== "function") return "";
+    const refreshed = await oauth.refresh(session.refreshToken);
+    session.accessToken = refreshed.accessToken;
+    session.accessTokenExpiresAt = refreshed.accessTokenExpiresAt;
+    if (refreshed.grantedScope) session.grantedScope = refreshed.grantedScope;
+    return session.accessToken;
+  }
+
+  async function googleJson(session, target) {
+    const accessToken = await googleAccessToken(session);
+    if (!accessToken) return { reauthorize: true };
+    const response = await (options.fetchImpl || fetch)(target, { headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" } });
+    if (response.status === 401) {
+      session.accessToken = "";
+      session.accessTokenExpiresAt = 0;
+    }
+    if (!response.ok) {
+      const error = new Error(`Google API request failed (${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
+    return response.json();
+  }
 
   function clean(current) {
     for (const [key, session] of activeSessions) if (session.expiresAt <= current) activeSessions.delete(key);
@@ -254,7 +317,11 @@ function createApp(options = {}) {
         authAttempts.delete(req.socket.remoteAddress || "unknown");
         const expiresAt = current + ttlMs;
         const token = createSession();
-        activeSessions.set(tokenKey(token, sessionSecret), { sub: identity.sub, email: identity.email, expiresAt });
+        activeSessions.set(tokenKey(token, sessionSecret), {
+          sub: identity.sub, email: identity.email, expiresAt,
+          accessToken: identity.accessToken || "", refreshToken: identity.refreshToken || "",
+          accessTokenExpiresAt: identity.accessTokenExpiresAt || 0, grantedScope: identity.grantedScope || ""
+        });
         const sessionCookie = `${COOKIE_NAME}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(ttlMs / 1000)}${secureCookies ? "; Secure" : ""}`;
         res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: transaction.next, "Set-Cookie": [clearTransaction, sessionCookie] });
         return res.end("Signed in");
@@ -278,6 +345,58 @@ function createApp(options = {}) {
         res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: `/login?next=${encodeURIComponent(next)}` });
         return res.end("Authentication required");
       }
+
+      if (pathname === "/api/me") {
+        if (req.method !== "GET") return send(res, 405, "Method not allowed", undefined, { Allow: "GET" });
+        return send(res, 200, JSON.stringify({ email: session.email, connected: Boolean(session.accessToken || session.refreshToken) }), "application/json; charset=utf-8");
+      }
+
+      if (pathname === "/api/calendar") {
+        if (req.method !== "GET") return send(res, 405, "Method not allowed", undefined, { Allow: "GET" });
+        const timeMin = new Date(Math.max(Date.now() - 12 * 60 * 60 * 1000, Number(requestUrl.searchParams.get("timeMin") || 0) || 0));
+        const timeMax = new Date(Math.min(timeMin.getTime() + 31 * 24 * 60 * 60 * 1000, Number(requestUrl.searchParams.get("timeMax") || 0) || timeMin.getTime() + 14 * 24 * 60 * 60 * 1000));
+        const target = new URL(GOOGLE_CALENDAR_ENDPOINT);
+        target.search = new URLSearchParams({
+          timeMin: timeMin.toISOString(), timeMax: timeMax.toISOString(), singleEvents: "true", orderBy: "startTime", maxResults: "100",
+          fields: "items(id,summary,start,end,location,htmlLink,status),nextPageToken"
+        });
+        try {
+          const data = await googleJson(session, target);
+          if (data.reauthorize) return send(res, 409, JSON.stringify({ error: "reauthorization_required" }), "application/json; charset=utf-8");
+          const events = Array.isArray(data.items) ? data.items.filter(item => item && item.status !== "cancelled").map(item => ({
+            id: String(item.id || ""), title: String(item.summary || "Busy"),
+            start: String(item.start?.dateTime || item.start?.date || ""), end: String(item.end?.dateTime || item.end?.date || ""),
+            allDay: Boolean(item.start?.date && !item.start?.dateTime), location: String(item.location || ""), url: String(item.htmlLink || "")
+          })) : [];
+          return send(res, 200, JSON.stringify({ source: "Google Calendar · read-only", events }), "application/json; charset=utf-8");
+        } catch (error) {
+          const status = error.status === 401 || error.status === 403 ? 409 : 502;
+          return send(res, status, JSON.stringify({ error: status === 409 ? "reauthorization_required" : "calendar_unavailable" }), "application/json; charset=utf-8");
+        }
+      }
+
+      if (pathname === "/api/drive") {
+        if (req.method !== "GET") return send(res, 405, "Method not allowed", undefined, { Allow: "GET" });
+        const query = String(requestUrl.searchParams.get("q") || "").trim().slice(0, 100);
+        const escaped = query.replace(/['\\]/g, character => `\\${character}`);
+        const target = new URL(GOOGLE_DRIVE_ENDPOINT);
+        const params = { pageSize: "25", orderBy: "modifiedTime desc", fields: "files(id,name,mimeType,modifiedTime,webViewLink,iconLink)" };
+        params.q = query ? `trashed = false and name contains '${escaped}'` : "trashed = false";
+        target.search = new URLSearchParams(params);
+        try {
+          const data = await googleJson(session, target);
+          if (data.reauthorize) return send(res, 409, JSON.stringify({ error: "reauthorization_required" }), "application/json; charset=utf-8");
+          const files = Array.isArray(data.files) ? data.files.map(item => ({
+            id: String(item.id || ""), name: String(item.name || "Untitled"), mimeType: String(item.mimeType || ""),
+            modifiedTime: String(item.modifiedTime || ""), url: String(item.webViewLink || ""), icon: String(item.iconLink || "")
+          })) : [];
+          return send(res, 200, JSON.stringify({ source: "Google Drive metadata · read-only", files }), "application/json; charset=utf-8");
+        } catch (error) {
+          const status = error.status === 401 || error.status === 403 ? 409 : 502;
+          return send(res, status, JSON.stringify({ error: status === 409 ? "reauthorization_required" : "drive_unavailable" }), "application/json; charset=utf-8");
+        }
+      }
+
       if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, "Method not allowed", undefined, { Allow: "GET, HEAD" });
 
       const relative = pathname.replace(/^\/+/, "");
