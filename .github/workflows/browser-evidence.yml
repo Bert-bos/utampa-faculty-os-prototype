@@ -64,7 +64,7 @@ jobs:
           const fs = require('fs');
           const { chromium } = require('playwright-core');
           const base = 'http://127.0.0.1:4175';
-          const evidence = { exactHead: process.env.RC_SHA, identity: 'injected synthetic Google OIDC; no real account or token', data: 'repository synthetic fixture only; no real/private/FERPA/student/founder data', screenshots: [], checks: {}, failures: [] };
+          const evidence = { exactHead: process.env.RC_SHA, identity: 'injected synthetic Google OIDC; no real account or token', data: 'browser-routed sanitized Calendar/Drive metadata fixtures only; no real/private/FERPA/student/founder data', screenshots: [], checks: {}, failures: [] };
           const assert = (ok, message) => { if (!ok) evidence.failures.push(message); };
           async function shot(page, name, authState) {
             await page.screenshot({ path: 'evidence/' + name + '.png', fullPage: true });
@@ -93,6 +93,12 @@ jobs:
             await page.waitForSelector('[data-cc-workspace="bos"][aria-disabled="true"]');
             await page.waitForTimeout(250);
             assert(await page.locator('input[type=password]').count() === 0, 'no local password field');
+          }
+          async function routeAuthorizedSources(page, options = {}) {
+            const events = options.events === undefined ? [{ id: 'event-1', title: 'ENT 330 · Venture Validation', start: '2026-09-23T16:00:00Z', end: '2026-09-23T17:00:00Z', location: 'Sykes 134', url: 'https://calendar.google.com/calendar/event?eid=synthetic', allDay: false }] : options.events;
+            const files = options.files === undefined ? [{ id: 'file-1', name: 'ENT 330 Venture Validation Deck', mimeType: 'application/vnd.google-apps.presentation', modifiedTime: '2026-09-22T15:00:00Z', url: 'https://drive.google.com/open?id=synthetic' }] : options.files;
+            await page.route('**/api/calendar', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ events, source: 'Google Calendar (read-only test fixture)' }) }));
+            await page.route('**/api/drive**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ files, source: 'Google Drive metadata (read-only test fixture)' }) }));
           }
           (async () => {
             const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_BIN, args: ['--no-sandbox'] });
@@ -142,8 +148,9 @@ jobs:
 
               for (const [name, width, height] of [['06-dashboard-desktop-1440',1440,1000],['07-dashboard-mobile-390',390,844],['08-dashboard-mobile-375',375,812]]) {
                 const page = await browser.newPage({ viewport: { width, height } });
+                await routeAuthorizedSources(page);
                 await login(page);
-                await page.waitForFunction(() => /sample data|synthetic/i.test(document.body.innerText));
+                await page.waitForSelector('.ut-live-view .ut-event');
                 const state = await shot(page, name, 'authenticated-synthetic-oidc');
                 assert(state.geometry.scrollWidth <= state.geometry.clientWidth, name + ' overflow');
                 const bos = page.locator('[data-cc-workspace="bos"]');
@@ -156,10 +163,10 @@ jobs:
                   await page.screenshot({ path: 'evidence/15-dashboard-switcher-keyboard-focus-mobile-390.png', fullPage: true });
                   evidence.screenshots.push('15-dashboard-switcher-keyboard-focus-mobile-390.png');
                 }
-                const fixture = await page.evaluate(async () => { const r = await fetch('/data/spartan-incubator.fixture.json'); return { status: r.status, body: await r.json() }; });
-                assert(fixture.status === 200 && fixture.body.__synthetic === true, name + ' synthetic fixture');
-                state.provenanceVisible = /sample data|synthetic/i.test(await page.locator('body').innerText());
-                assert(state.provenanceVisible, name + ' visible data provenance');
+                const bodyText = await page.locator('body').innerText();
+                state.liveAuthorizedView = /ENT 330 · Venture Validation/.test(bodyText) && /Google Calendar \+ Google Drive metadata · read-only/.test(bodyText);
+                assert(state.liveAuthorizedView, name + ' authorized read-only source view');
+                assert(!/Check engagement concerns|Two students need/i.test(bodyText), name + ' old protected-looking fixture hidden');
                 await page.close();
               }
 
@@ -183,34 +190,42 @@ jobs:
               await replay.close();
 
               const service = await browser.newPage({ viewport: { width: 390, height: 844 } });
-              await login(service, '/service/spartan-incubator');
-              await service.waitForSelector('.ccIncubatorMediaChip');
-              const mediaChip = service.locator('.ccIncubatorMediaChip').first();
-              assert(await mediaChip.evaluate(node => node.getBoundingClientRect().height) >= 44, 'Service media review touch target');
-              await mediaChip.click();
-              assert(await mediaChip.getAttribute('aria-expanded') === 'true', 'Service media review expanded');
-              const serviceState = await shot(service, '11-service-deep-link-media-review', 'authenticated-service-workflow');
-              serviceState.reviewPanelVisible = /Status:/.test(await service.locator('body').innerText());
-              assert(serviceState.reviewPanelVisible, 'Service review panel content');
+              await routeAuthorizedSources(service, { events: [{ id: 'event-service', title: 'Spartan Incubator mentor review', start: '2026-09-24T16:00:00Z', end: '2026-09-24T17:00:00Z', url: 'https://calendar.google.com/calendar/event?eid=service', allDay: false }], files: [{ id: 'file-service', name: 'Spartan Incubator mentor notes', mimeType: 'application/vnd.google-apps.document', modifiedTime: '2026-09-22T15:00:00Z', url: 'https://drive.google.com/open?id=service' }] });
+              await login(service);
+              await service.locator('.sectionTabs button', { hasText: 'Service' }).click();
+              await service.waitForSelector('.ut-live-view .ut-event');
+              const serviceState = await shot(service, '11-service-authorized-live-workflow', 'authenticated-service-workflow');
+              serviceState.liveServiceVisible = /Spartan Incubator mentor review/.test(await service.locator('body').innerText());
+              assert(serviceState.liveServiceVisible, 'Service authorized live content');
+              await service.locator('.prepareHeader').click();
+              await service.waitForSelector('.ut-live-drawer .ut-file');
+              assert(/Spartan Incubator mentor notes/.test(await service.locator('.ut-live-drawer').innerText()), 'Prepare Me related Drive source');
               await service.close();
 
               const noData = await browser.newPage({ viewport: { width: 390, height: 844 } });
-              await noData.route('**/data/spartan-incubator.fixture.json', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ __synthetic: true, meta: { sourceLabel: 'Synthetic no-data test' } }) }));
+              await routeAuthorizedSources(noData, { events: [], files: [] });
               await login(noData);
-              await noData.waitForFunction(() => document.body.innerText.includes('Submissions: no data'));
-              const noDataState = await shot(noData, '12-no-data-not-zero', 'authenticated-synthetic-no-data');
-              noDataState.noDataVisible = (await noData.locator('body').innerText()).includes('Submissions: no data');
-              assert(noDataState.noDataVisible, 'missing submissions shown as no data');
+              await noData.waitForFunction(() => document.body.innerText.includes('No matching authorized calendar events.'));
+              const noDataState = await shot(noData, '12-authorized-empty-state', 'authenticated-authorized-empty');
+              const noDataText = await noData.locator('body').innerText();
+              noDataState.emptyStateVisible = noDataText.includes('No matching authorized calendar events.') && noDataText.includes('No matching authorized Drive files.');
+              assert(noDataState.emptyStateVisible, 'authorized empty sources explained');
               await noData.close();
 
               const verifiedZero = await browser.newPage({ viewport: { width: 390, height: 844 } });
-              await verifiedZero.route('**/data/spartan-incubator.fixture.json', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ __synthetic: true, meta: { sourceLabel: 'Synthetic verified-zero test' }, weeklySubmissions: [], commitments: [], wins: [], needs: [], recruiting: [], mediaFlags: [] }) }));
+              await routeAuthorizedSources(verifiedZero);
               await login(verifiedZero);
-              await verifiedZero.waitForFunction(() => document.body.innerText.includes('Submissions: 0'));
-              const zeroState = await shot(verifiedZero, '13-verified-empty-is-zero', 'authenticated-synthetic-verified-zero');
+              await verifiedZero.locator('.sectionTabs button', { hasText: 'People' }).click();
+              await verifiedZero.waitForFunction(() => document.body.innerText.includes('No authorized people source connected'));
+              const zeroState = await shot(verifiedZero, '13-people-protected-boundary-empty', 'authenticated-protected-boundary');
               const zeroText = await verifiedZero.locator('body').innerText();
-              zeroState.verifiedZeroVisible = zeroText.includes('Submissions: 0') && zeroText.includes('Recruiting verified: 0/0');
-              assert(zeroState.verifiedZeroVisible, 'verified empty arrays shown as zero');
+              zeroState.peopleBoundaryVisible = zeroText.includes('No authorized people source connected') && zeroText.includes('student records') && zeroText.includes('intentionally excluded');
+              assert(zeroState.peopleBoundaryVisible, 'People boundary and legitimate empty state');
+              await verifiedZero.locator('.ut-open-search').click();
+              await verifiedZero.locator('#ut-search-input').fill('ENT 330');
+              await verifiedZero.locator('.ut-search-form button').click();
+              await verifiedZero.waitForSelector('.ut-search-results .ut-event');
+              assert(/ENT 330 · Venture Validation/.test(await verifiedZero.locator('.ut-search-results').innerText()), 'Search returns authorized Calendar result');
               await verifiedZero.close();
 
               evidence.verdict = evidence.failures.length ? 'FAIL' : 'PASS';
@@ -232,7 +247,7 @@ jobs:
             echo "EXACT_HEAD=$RC_SHA"
             echo "RUN_URL=https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "IDENTITY=injected synthetic Google OIDC; no real account or token"
-            echo "DATA=repository synthetic fixture only; no real/private/FERPA/student/founder data"
+            echo "DATA=browser-routed sanitized Calendar/Drive metadata fixtures only; no real/private/FERPA/student/founder data"
           } > evidence/MANIFEST.txt
           find evidence -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > evidence/SHA256SUMS.txt
 
