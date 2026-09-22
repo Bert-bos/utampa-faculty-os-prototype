@@ -62,7 +62,8 @@
   }
   function eventMarkup(event) {
     var link = event.url ? '<a href="' + escapeHtml(event.url) + '" target="_blank" rel="noopener">Open in Google Calendar</a>' : "";
-    return '<article class="ut-event"><div><time>' + escapeHtml(event.allDay ? "All day" : formatDate(event.start, true)) + '</time><h3>' + escapeHtml(event.title) + '</h3>' + (event.location ? '<p>' + escapeHtml(event.location) + '</p>' : "") + '</div><div class="ut-inline-actions"><button data-prepare-event="' + escapeHtml(event.title) + '">Prepare me</button>' + link + '</div></article>';
+    var details = [event.calendar, event.location].filter(Boolean).map(function (value) { return escapeHtml(value); }).join(" · ");
+    return '<article class="ut-event"><div><time>' + escapeHtml(event.allDay ? "All day" : formatDate(event.start, true)) + '</time><h3>' + escapeHtml(event.title) + '</h3>' + (details ? '<p>' + details + '</p>' : "") + '</div><div class="ut-inline-actions"><button data-prepare-event="' + escapeHtml(event.title) + '">Prepare me</button>' + link + '</div></article>';
   }
   function fileMarkup(file) {
     var link = file.url ? '<a href="' + escapeHtml(file.url) + '" target="_blank" rel="noopener">Open</a>' : "";
@@ -92,7 +93,7 @@
     try {
       var result = await loadCalendar();
       if (result.reauthorize) content.innerHTML = reconnectMarkup();
-      else if (!result.events.length) content.innerHTML = '<div class="ut-empty"><h3>No events found</h3><p>Your personal Google Calendar has no events in the next two weeks.</p></div>';
+      else if (!result.events.length) content.innerHTML = '<div class="ut-empty"><h3>No events found</h3><p>Your selected personal Google calendars have no events in the next two weeks.</p></div>';
       else content.innerHTML = '<div class="ut-event-list">' + result.events.map(eventMarkup).join("") + '</div><p class="ut-source">Source: ' + escapeHtml(result.source) + '</p>';
     } catch (_) {
       content.innerHTML = '<div class="ut-empty"><h3>Calendar is temporarily unavailable</h3><p>The dashboard could not read Google Calendar. Nothing was changed.</p><button class="ut-retry">Try again</button></div>';

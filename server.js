@@ -17,7 +17,8 @@ const GOOGLE_ISSUERS = new Set(["accounts.google.com", "https://accounts.google.
 const GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const GOOGLE_JWKS_ENDPOINT = "https://www.googleapis.com/oauth2/v3/certs";
-const GOOGLE_CALENDAR_ENDPOINT = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
+const GOOGLE_CALENDAR_LIST_ENDPOINT = "https://www.googleapis.com/calendar/v3/users/me/calendarList";
+const GOOGLE_CALENDAR_BASE = "https://www.googleapis.com/calendar/v3/calendars";
 const GOOGLE_DRIVE_ENDPOINT = "https://www.googleapis.com/drive/v3/files";
 const GOOGLE_SCOPES = [
   "openid",
@@ -355,20 +356,44 @@ function createApp(options = {}) {
         if (req.method !== "GET") return send(res, 405, "Method not allowed", undefined, { Allow: "GET" });
         const timeMin = new Date(Math.max(Date.now() - 12 * 60 * 60 * 1000, Number(requestUrl.searchParams.get("timeMin") || 0) || 0));
         const timeMax = new Date(Math.min(timeMin.getTime() + 31 * 24 * 60 * 60 * 1000, Number(requestUrl.searchParams.get("timeMax") || 0) || timeMin.getTime() + 14 * 24 * 60 * 60 * 1000));
-        const target = new URL(GOOGLE_CALENDAR_ENDPOINT);
-        target.search = new URLSearchParams({
-          timeMin: timeMin.toISOString(), timeMax: timeMax.toISOString(), singleEvents: "true", orderBy: "startTime", maxResults: "100",
-          fields: "items(id,summary,start,end,location,htmlLink,status),nextPageToken"
-        });
         try {
-          const data = await googleJson(session, target);
-          if (data.reauthorize) return send(res, 409, JSON.stringify({ error: "reauthorization_required" }), "application/json; charset=utf-8");
-          const events = Array.isArray(data.items) ? data.items.filter(item => item && item.status !== "cancelled").map(item => ({
-            id: String(item.id || ""), title: String(item.summary || "Busy"),
-            start: String(item.start?.dateTime || item.start?.date || ""), end: String(item.end?.dateTime || item.end?.date || ""),
-            allDay: Boolean(item.start?.date && !item.start?.dateTime), location: String(item.location || ""), url: String(item.htmlLink || "")
-          })) : [];
-          return send(res, 200, JSON.stringify({ source: "Google Calendar · read-only", events }), "application/json; charset=utf-8");
+          const calendarListUrl = new URL(GOOGLE_CALENDAR_LIST_ENDPOINT);
+          calendarListUrl.search = new URLSearchParams({
+            maxResults: "250", showDeleted: "false",
+            fields: "items(id,summary,primary,selected,hidden,deleted,accessRole)"
+          });
+          const calendarList = await googleJson(session, calendarListUrl);
+          if (calendarList.reauthorize) return send(res, 409, JSON.stringify({ error: "reauthorization_required" }), "application/json; charset=utf-8");
+          const calendars = (Array.isArray(calendarList.items) ? calendarList.items : [])
+            .filter(item => item && !item.deleted && !item.hidden && (item.primary === true || item.selected === true))
+            .filter(item => typeof item.id === "string" && item.id)
+            .slice(0, 50);
+          if (!calendars.some(item => item.primary === true)) calendars.unshift({ id: "primary", summary: "Primary", primary: true });
+
+          const eventGroups = await Promise.all(calendars.map(async calendar => {
+            const target = new URL(`${GOOGLE_CALENDAR_BASE}/${encodeURIComponent(calendar.id)}/events`);
+            target.search = new URLSearchParams({
+              timeMin: timeMin.toISOString(), timeMax: timeMax.toISOString(), singleEvents: "true", orderBy: "startTime", maxResults: "100",
+              fields: "items(id,summary,start,end,location,htmlLink,status),nextPageToken"
+            });
+            try {
+              const data = await googleJson(session, target);
+              if (data.reauthorize) return { reauthorize: true, events: [] };
+              const events = Array.isArray(data.items) ? data.items.filter(item => item && item.status !== "cancelled").map(item => ({
+                id: `${calendar.id}:${String(item.id || "")}`, title: String(item.summary || "Busy"),
+                start: String(item.start?.dateTime || item.start?.date || ""), end: String(item.end?.dateTime || item.end?.date || ""),
+                allDay: Boolean(item.start?.date && !item.start?.dateTime), location: String(item.location || ""), url: String(item.htmlLink || ""),
+                calendar: String(calendar.summary || (calendar.primary ? "Primary" : "Subscribed calendar"))
+              })) : [];
+              return { reauthorize: false, events };
+            } catch (error) {
+              if (error.status === 401) throw error;
+              return { reauthorize: false, events: [] };
+            }
+          }));
+          if (eventGroups.some(group => group.reauthorize)) return send(res, 409, JSON.stringify({ error: "reauthorization_required" }), "application/json; charset=utf-8");
+          const events = eventGroups.flatMap(group => group.events).sort((left, right) => String(left.start).localeCompare(String(right.start)));
+          return send(res, 200, JSON.stringify({ source: `Google Calendar · ${calendars.length} selected calendar${calendars.length === 1 ? "" : "s"} · read-only`, events }), "application/json; charset=utf-8");
         } catch (error) {
           const status = error.status === 401 || error.status === 403 ? 409 : 502;
           return send(res, status, JSON.stringify({ error: status === 409 ? "reauthorization_required" : "calendar_unavailable" }), "application/json; charset=utf-8");

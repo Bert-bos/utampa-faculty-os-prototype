@@ -257,7 +257,13 @@ test("authorized Calendar and Drive API routes proxy only read-only sanitized da
   });
   const fetchImpl = async (url, options) => {
     requests.push({ url: String(url), options });
-    if (String(url).includes("calendar")) return new Response(JSON.stringify({ items: [{ id: "event-1", summary: "ENT 330", description: "must not leak", start: { dateTime: "2026-09-22T16:00:00Z" }, end: { dateTime: "2026-09-22T17:00:00Z" }, htmlLink: "https://calendar.google.com/event" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    if (String(url).includes("/users/me/calendarList")) return new Response(JSON.stringify({ items: [
+      { id: "primary@example.com", summary: "Bert", primary: true, selected: true, accessRole: "owner" },
+      { id: "outlook-feed@import.calendar.google.com", summary: "UTampa Outlook", selected: true, accessRole: "reader" },
+      { id: "holidays@example.com", summary: "Holidays", selected: false, accessRole: "reader" }
+    ] }), { status: 200, headers: { "content-type": "application/json" } });
+    if (String(url).includes("/calendars/primary%40example.com/events")) return new Response(JSON.stringify({ items: [{ id: "event-1", summary: "ENT 330", description: "must not leak", start: { dateTime: "2026-09-22T16:00:00Z" }, end: { dateTime: "2026-09-22T17:00:00Z" }, htmlLink: "https://calendar.google.com/event" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    if (String(url).includes("/calendars/outlook-feed%40import.calendar.google.com/events")) return new Response(JSON.stringify({ items: [{ id: "event-2", summary: "Office hours", start: { dateTime: "2026-09-22T18:00:00Z" }, end: { dateTime: "2026-09-22T19:00:00Z" }, htmlLink: "https://calendar.google.com/event-2" }] }), { status: 200, headers: { "content-type": "application/json" } });
     return new Response(JSON.stringify({ files: [{ id: "file-1", name: "ENT 330 deck", mimeType: "application/vnd.google-apps.presentation", modifiedTime: "2026-09-22T12:00:00Z", webViewLink: "https://drive.google.com/file" }] }), { status: 200, headers: { "content-type": "application/json" } });
   };
   const { origin } = await fixture(t, { oauth, fetchImpl });
@@ -267,12 +273,16 @@ test("authorized Calendar and Drive API routes proxy only read-only sanitized da
   const calendarBody = await calendar.json();
   assert.equal(calendarBody.events[0].title, "ENT 330");
   assert.equal(calendarBody.events[0].description, undefined);
+  assert.equal(calendarBody.events[1].title, "Office hours");
+  assert.equal(calendarBody.events[1].calendar, "UTampa Outlook");
   const drive = await fetch(`${origin}/api/drive?q=ENT%20330`, { headers: { Cookie: sessionCookie } });
   assert.equal(drive.status, 200);
   assert.equal((await drive.json()).files[0].name, "ENT 330 deck");
   assert.ok(requests.every(request => request.options.headers.Authorization === "Bearer access-token"));
-  assert.match(requests[0].url, /fields=/);
-  assert.match(requests[1].url, /trashed/);
+  assert.ok(requests.some(request => request.url.includes("/users/me/calendarList")));
+  assert.ok(requests.some(request => request.url.includes("outlook-feed%40import.calendar.google.com/events")));
+  assert.ok(!requests.some(request => request.url.includes("holidays%40example.com/events")));
+  assert.ok(requests.some(request => /trashed/.test(request.url)));
 });
 
 test("repository data contract stays synthetic and unknown is never coerced to zero", () => {
