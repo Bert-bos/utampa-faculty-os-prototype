@@ -196,6 +196,7 @@ jobs:
               const service = await browser.newPage({ viewport: { width: 390, height: 844 } });
               await routeAuthorizedSources(service, { events: [{ id: 'event-service', title: 'Spartan Incubator mentor review', start: '2026-09-24T16:00:00Z', end: '2026-09-24T17:00:00Z', url: 'https://calendar.google.com/calendar/event?eid=service', allDay: false }], files: [{ id: 'file-service', name: 'Spartan Incubator mentor notes', mimeType: 'application/vnd.google-apps.document', modifiedTime: '2026-09-22T15:00:00Z', url: 'https://drive.google.com/open?id=service' }] });
               await login(service);
+              await service.waitForSelector('.todayDirective');
               await service.locator('.sectionTabs button', { hasText: 'Teaching' }).click();
               await service.waitForSelector('.focusCourse');
               await service.waitForSelector('.ut-source-status[data-page="Teaching"]');
@@ -225,6 +226,7 @@ jobs:
               const noData = await browser.newPage({ viewport: { width: 390, height: 844 } });
               await routeAuthorizedSources(noData, { events: [], files: [] });
               await login(noData);
+              await noData.waitForSelector('.todayDirective');
               await noData.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
               await noData.waitForFunction(() => document.body.innerText.includes('No events found'));
               const noDataState = await shot(noData, '12-calendar-authorized-empty-state', 'authenticated-authorized-empty');
@@ -236,6 +238,7 @@ jobs:
               const verifiedZero = await browser.newPage({ viewport: { width: 390, height: 844 } });
               await routeAuthorizedSources(verifiedZero);
               await login(verifiedZero);
+              await verifiedZero.waitForSelector('.todayDirective');
               await verifiedZero.locator('.sectionTabs button', { hasText: 'People' }).click();
               await verifiedZero.waitForSelector('.peopleWorkspace');
               await verifiedZero.waitForFunction(() => document.body.innerText.includes('No directory, contacts, or student system is connected'));
