@@ -374,7 +374,9 @@
        component initializes. The trigger is rewired by the observer, but the
        retained panel reference may then point at a detached node. Reattach it
        only when the user opens the controls, after hydration has settled. */
-    if (!panel.isConnected) document.body.appendChild(panel);
+    var reconnected = !panel.isConnected;
+    if (reconnected) document.body.appendChild(panel);
+    return reconnected;
   }
 
   function inertBackground() {
@@ -392,8 +394,21 @@
   }
 
   function open() {
-    ensurePanelConnected();
-    if (!panel.hidden) { keepFocusInPanel(); return; }
+    var reconnected = ensurePanelConnected();
+    if (!panel.hidden) {
+      /* If an open panel was removed by hydration, its inert/focus snapshot
+         describes the old document tree. Rebuild both against the current
+         trigger and body before returning to the existing panel state. */
+      if (reconnected) {
+        restoreBackground();
+        prevFocus = document.activeElement;
+        inertBackground();
+        panel.setAttribute("aria-hidden", "false");
+        panel.classList.add("is-open");
+      }
+      keepFocusInPanel();
+      return;
+    }
     prevFocus = document.activeElement;
     fillDestinations();
     reset();

@@ -82,9 +82,13 @@ jobs:
             }
             return { reached: false };
           }
+          async function waitForAppHydrated(page) {
+            await page.waitForFunction(() => Object.keys(document).some(key => key.startsWith('_reactListening')));
+          }
           async function login(page, next = '/') {
             await page.goto(base + '/login?next=' + encodeURIComponent(next), { waitUntil: 'domcontentloaded' });
             await Promise.all([page.waitForURL(base + next), page.locator('[data-testid=google-sign-in]').click()]);
+            await waitForAppHydrated(page);
             await page.waitForSelector('[data-cc-workspace="bos"][aria-disabled="true"]');
             await page.waitForTimeout(250);
             assert(await page.locator('input[type=password]').count() === 0, 'no local password field');
@@ -266,6 +270,7 @@ jobs:
               await actions.locator('.drawer .ut-complete').click();
               assert(await firstTask.isHidden(), 'completed Today item leaves active list');
               await actions.reload({ waitUntil: 'domcontentloaded' });
+              await waitForAppHydrated(actions);
               await actions.waitForSelector('.todayDirective');
               assert(await actions.locator('.todayTask', { hasText: 'Review next-class deck' }).isHidden(), 'completed Today item persists after reload');
               await actions.waitForSelector('.ut-source-status .ut-mobile-actions-center');
@@ -278,6 +283,7 @@ jobs:
               await actions.locator('.ut-live-drawer .drawerClose').click();
               assert(await actions.locator('.todayTask', { hasText: 'Review next-class deck' }).isVisible(), 'restored Today item returns to active list');
               await actions.reload({ waitUntil: 'domcontentloaded' });
+              await waitForAppHydrated(actions);
               await actions.waitForSelector('.todayDirective');
               assert(await actions.locator('.todayTask', { hasText: 'Review next-class deck' }).isVisible(), 'restored Today item persists after reload');
               const routedTask = actions.locator('.todayTask', { hasText: 'Confirm lesson-plan sequence' });
@@ -294,6 +300,7 @@ jobs:
               assert(/nobody notified/i.test(await actions.locator('.ut-toast').innerText()), 'route semantics state that nobody was notified');
               assert(await actions.locator('.ut-toast').getAttribute('aria-atomic') === 'true', 'local route result is announced atomically');
               await actions.reload({ waitUntil: 'domcontentloaded' });
+              await waitForAppHydrated(actions);
               await actions.waitForSelector('.todayDirective');
               assert(await actions.locator('.todayTask', { hasText: 'Confirm lesson-plan sequence' }).isHidden(), 'locally staged route persists after reload');
               await actions.locator('.ut-source-status .ut-mobile-actions-center').click();
