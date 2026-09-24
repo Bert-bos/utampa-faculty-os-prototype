@@ -2,7 +2,7 @@
  * cc-workspace-switcher.v2.js
  * Wires the shared three-workspace switcher in the integrated dashboard shell.
  *
- * SUPERSEDES cc-workspace-switcher.v1.js (Drive 1k9LVbm7CwNGeSIy-lmmO8sXQ8f7aNNlV).
+ * SUPERSEDES the retired v1 workspace switcher.
  * Do not push v1. v2 is a strict superset; everything v1 did, v2 still does.
  *
  * Fixes defect D3 (Bert): the switcher shows labels but does not navigate.

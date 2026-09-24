@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const { URL, URLSearchParams } = require("node:url");
+const { ACTION_LABELS: SECTION_ACTION_LABELS, parseSectionFeedJson } = require("./lib/section-data-contract");
 
 const COOKIE_NAME = "utampa_session";
 const TRANSACTION_COOKIE = "utampa_oauth_tx";
@@ -13,6 +14,12 @@ const TRANSACTION_TTL_MS = 10 * 60 * 1000;
 const AUTH_WINDOW_MS = 15 * 60 * 1000;
 const AUTH_MAX_ATTEMPTS = 20;
 const MAX_PENDING_AUTH = 500;
+const MAX_CALENDAR_LIST_PAGES = 10;
+const MAX_CALENDARS = 50;
+const MAX_CALENDAR_EVENT_PAGES = 20;
+const MAX_DRIVE_PAGES = 10;
+const GOOGLE_REQUEST_TIMEOUT_MS = 10000;
+const GOOGLE_CONCURRENCY = 5;
 const GOOGLE_ISSUERS = new Set(["accounts.google.com", "https://accounts.google.com"]);
 const GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -32,10 +39,10 @@ const CONTENT_TYPES = {
   ".svg": "image/svg+xml; charset=utf-8", ".webp": "image/webp", ".woff": "font/woff", ".woff2": "font/woff2"
 };
 const ROOT_ASSETS = new Set([
-  "index.html", "utampa-logo.svg", "favicon.svg", "cc-shell-responsive.v1.css", "cc-recorder.css",
-  "cc-workspace-switcher.v2.js", "cc-shell-shim.v1.js", "cc-recorder.js", "cc-incubator-adapter.v1.js",
+  "index.html", "favicon.svg", "app-shell.v1.css", "cc-workspace-switcher.v2.js",
   "utampa-live.v1.js", "utampa-live.v1.css"
 ]);
+const SECTION_IDS = new Set(["today", "teaching", "research", "service", "people"]);
 
 function required(name, value, minLength = 1) {
   if (typeof value !== "string" || value.length < minLength) {
@@ -99,10 +106,107 @@ function opaqueEventId(calendarId, eventId) {
   return crypto.createHash("sha256").update(`${calendarId}\u0000${eventId}`).digest("base64url").slice(0, 24);
 }
 
+function effectiveFreshness(freshness, staleAfter, currentMs) {
+  if (freshness === "current" && typeof staleAfter === "string" && Date.parse(staleAfter) <= currentMs) return "stale";
+  return freshness;
+}
+
+function projectedReason(status) {
+  if (status === "unconfigured") return "No approved private source is configured for this section.";
+  if (status === "unavailable") return "The approved private source is currently unavailable.";
+  if (status === "partial") return "The approved source returned an incomplete result.";
+  return undefined;
+}
+
+function projectSectionPayload(feed, sectionId, currentMs) {
+  const section = feed.sections[sectionId];
+  const allowedActions = new Set(section.allowedActions);
+  const items = section.items.map(item => {
+    const actions = item.actions.filter(action => allowedActions.has(action.type) && SECTION_ACTION_LABELS[action.type]).map(action => ({
+      type: action.type,
+      label: SECTION_ACTION_LABELS[action.type],
+      ...(action.type === "open_source" ? { href: action.href } : {}),
+      ...(action.type === "open_section" ? { targetSection: action.targetSection } : {})
+    }));
+    return {
+      id: item.id,
+      section: item.section,
+      category: item.category,
+      title: item.title,
+      summary: item.summary ?? null,
+      status: item.status,
+      priority: item.priority,
+      needsOwner: item.needsOwner,
+      asOf: item.asOf,
+      freshness: effectiveFreshness(item.freshness, item.staleAfter, currentMs),
+      staleAfter: item.staleAfter,
+      dueAt: item.dueAt ?? null,
+      startAt: item.startAt ?? null,
+      endAt: item.endAt ?? null,
+      tags: Array.isArray(item.tags) ? item.tags : [],
+      actions
+    };
+  });
+  const itemFreshness = items.map(item => item.freshness);
+  const freshness = itemFreshness.length
+    ? itemFreshness.some(value => value === "stale") ? "stale" : itemFreshness.every(value => value === "current") ? "current" : "unknown"
+    : effectiveFreshness(section.freshness, section.staleAfter, currentMs);
+  const projectedStaleAfter = itemFreshness.length && ["current", "stale"].includes(freshness)
+    ? items.map(item => item.staleAfter).filter(value => typeof value === "string").sort((left, right) => Date.parse(left) - Date.parse(right))[0] || null
+    : section.staleAfter;
+  const reason = projectedReason(section.completeness.status);
+  return {
+    viewVersion: "utampa-section-view.v1",
+    feedId: feed.feedId,
+    generatedAt: feed.generatedAt,
+    servedAt: new Date(currentMs).toISOString(),
+    section: {
+      id: section.id,
+      asOf: section.asOf,
+      freshness,
+      staleAfter: projectedStaleAfter,
+      completeness: {
+        status: section.completeness.status,
+        expectedCount: section.completeness.expectedCount,
+        receivedCount: section.completeness.receivedCount,
+        ...(reason ? { reason } : {})
+      },
+      items
+    }
+  };
+}
+
+function eventDedupeKey(item, start, end) {
+  const iCalUid = typeof item.iCalUID === "string" ? item.iCalUID.trim().toLowerCase() : "";
+  const normalizedStart = new Date(start).toISOString();
+  const normalizedEnd = new Date(end).toISOString();
+  const identity = iCalUid
+    ? `ical\u0000${iCalUid}\u0000${normalizedStart}\u0000${normalizedEnd}`
+    : `event\u0000${String(item.summary || "Busy").trim().toLowerCase()}\u0000${normalizedStart}\u0000${normalizedEnd}\u0000${String(item.location || "").trim().toLowerCase()}`;
+  return crypto.createHash("sha256").update(identity).digest("base64url");
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  return results;
+}
+
 function sanitizeIndexHtml(value) {
-  return String(value).replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, block =>
+  const cleaned = String(value).replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, block =>
     block.includes("__CF$cv$params") && block.includes("/cdn-cgi/challenge-platform/") ? "" : block
   );
+  const failClosedStyle = '<style id="utampa-fail-closed-shell">.topShell>:not(.ut-live-view):not(.ut-calendar-panel):not(.ut-source-status){display:none!important}.sectionTabs button em,.globalRecord,.prepareHeader:not(.ut-live-ready),.persistentTools>.headerCountdown:not(.ut-live-countdown){display:none!important}</style>';
+  if (cleaned.includes('id="utampa-fail-closed-shell"')) return cleaned;
+  return cleaned.includes("</head>") ? cleaned.replace("</head>", `${failClosedStyle}</head>`) : `${failClosedStyle}${cleaned}`;
 }
 
 function securityHeaders(contentType) {
@@ -212,13 +316,14 @@ function createGoogleOAuthProvider(config) {
   };
 }
 
-function createSyntheticOAuthProvider() {
+function createSyntheticOAuthProvider(email) {
+  const syntheticEmail = required("synthetic email", email);
   return {
     synthetic: true,
     authorizationUrl({ state, nonce }) { return `/__test/authorize?state=${encodeURIComponent(state)}&nonce=${encodeURIComponent(nonce)}`; },
     async exchangeAndVerify({ code, expectedNonce }) {
       if (code !== `synthetic:${expectedNonce}`) throw new Error("synthetic identity rejected");
-      return { sub: "synthetic-subject", email: "bert@bertseither.com", accessToken: "synthetic-access-token", refreshToken: "synthetic-refresh-token", accessTokenExpiresAt: Date.now() + 3600000, grantedScope: GOOGLE_SCOPES };
+      return { sub: "synthetic-subject", email: syntheticEmail, accessToken: "synthetic-access-token", refreshToken: "synthetic-refresh-token", accessTokenExpiresAt: Date.now() + 3600000, grantedScope: GOOGLE_SCOPES };
     },
     async refresh() {
       return { accessToken: "synthetic-refreshed-token", accessTokenExpiresAt: Date.now() + 3600000, grantedScope: GOOGLE_SCOPES };
@@ -235,37 +340,66 @@ function createApp(options = {}) {
   const sessionSecret = required("UTAMPA_SESSION_SECRET", options.sessionSecret ?? process.env.UTAMPA_SESSION_SECRET, 32);
   const ttlMs = options.ttlMs || DEFAULT_TTL_MS;
   const now = options.now || Date.now;
+  const startupNow = now();
+  const sectionFeedJson = Object.hasOwn(options, "sectionFeedJson") ? options.sectionFeedJson : process.env.UTAMPA_SECTION_FEED_JSON;
+  const sectionFeed = parseSectionFeedJson(sectionFeedJson, { generatedAt: new Date(startupNow).toISOString(), now: startupNow });
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === "production";
-  const allowSynthetic = process.env.NODE_ENV === "test" && process.env.UTAMPA_SYNTHETIC_OIDC === "1";
-  const oauth = options.oauth || (allowSynthetic ? createSyntheticOAuthProvider() : createGoogleOAuthProvider({ clientId, clientSecret, redirectUri, fetchImpl: options.fetchImpl, now }));
+  const oauth = options.oauth || createGoogleOAuthProvider({ clientId, clientSecret, redirectUri, fetchImpl: options.fetchImpl, now });
   const activeSessions = new Map();
   const pendingAuth = new Map();
   const authAttempts = new Map();
 
-  async function googleAccessToken(session) {
-    if (session.accessToken && session.accessTokenExpiresAt > now() + 60000) return session.accessToken;
+  async function googleAccessToken(session, forceRefresh = false) {
+    if (!forceRefresh && session.accessToken && session.accessTokenExpiresAt > now() + 60000) return session.accessToken;
+    if (session.refreshPromise) return session.refreshPromise;
     if (!session.refreshToken || typeof oauth.refresh !== "function") return "";
-    const refreshed = await oauth.refresh(session.refreshToken);
-    session.accessToken = refreshed.accessToken;
-    session.accessTokenExpiresAt = refreshed.accessTokenExpiresAt;
-    if (refreshed.grantedScope) session.grantedScope = refreshed.grantedScope;
-    return session.accessToken;
+    session.refreshPromise = (async () => {
+      const refreshed = await oauth.refresh(session.refreshToken);
+      session.accessToken = refreshed.accessToken;
+      session.accessTokenExpiresAt = refreshed.accessTokenExpiresAt;
+      if (refreshed.grantedScope) session.grantedScope = refreshed.grantedScope;
+      return session.accessToken;
+    })();
+    try { return await session.refreshPromise; }
+    finally { delete session.refreshPromise; }
   }
 
   async function googleJson(session, target) {
-    const accessToken = await googleAccessToken(session);
+    let accessToken = await googleAccessToken(session);
     if (!accessToken) return { reauthorize: true };
-    const response = await (options.fetchImpl || fetch)(target, { headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" } });
-    if (response.status === 401) {
-      session.accessToken = "";
-      session.accessTokenExpiresAt = 0;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), options.googleRequestTimeoutMs || GOOGLE_REQUEST_TIMEOUT_MS);
+      let response;
+      try {
+        response = await (options.fetchImpl || fetch)(target, {
+          headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+          signal: controller.signal
+        });
+      } finally { clearTimeout(timeout); }
+      if (response.status === 401) {
+        const rejectedAccessToken = accessToken;
+        if (session.accessToken === rejectedAccessToken) {
+          session.accessToken = "";
+          session.accessTokenExpiresAt = 0;
+        }
+        if (attempt === 0 && session.refreshToken && typeof oauth.refresh === "function") {
+          accessToken = session.accessToken && session.accessToken !== rejectedAccessToken
+            ? session.accessToken
+            : await googleAccessToken(session, true);
+          if (accessToken) continue;
+        }
+      }
+      if (!response.ok) {
+        const error = new Error(`Google API request failed (${response.status})`);
+        error.status = response.status;
+        throw error;
+      }
+      return response.json();
     }
-    if (!response.ok) {
-      const error = new Error(`Google API request failed (${response.status})`);
-      error.status = response.status;
-      throw error;
-    }
-    return response.json();
+    const error = new Error("Google API request failed (401)");
+    error.status = 401;
+    throw error;
   }
 
   function clean(current) {
@@ -363,8 +497,10 @@ function createApp(options = {}) {
       const current = now();
       const sessionKey = tokenKey(token, sessionSecret);
       const session = activeSessions.get(sessionKey);
+      const isApiRequest = pathname === "/api" || pathname.startsWith("/api/");
       if (!session || session.expiresAt <= current || !safeEqual(String(session.email).toLowerCase(), allowedEmail.toLowerCase()) || typeof session.sub !== "string" || !session.sub) {
         activeSessions.delete(sessionKey);
+        if (isApiRequest) return send(res, 401, JSON.stringify({ error: "authentication_required" }), "application/json; charset=utf-8");
         const next = safeNext(`${pathname}${requestUrl.search}`);
         res.writeHead(303, { ...securityHeaders("text/plain; charset=utf-8"), Location: `/login?next=${encodeURIComponent(next)}` });
         return res.end("Authentication required");
@@ -373,6 +509,14 @@ function createApp(options = {}) {
       if (pathname === "/api/me") {
         if (req.method !== "GET") return send(res, 405, "Method not allowed", undefined, { Allow: "GET" });
         return send(res, 200, JSON.stringify({ email: session.email, connected: Boolean(session.accessToken || session.refreshToken) }), "application/json; charset=utf-8");
+      }
+
+      if (pathname.startsWith("/api/sections/")) {
+        if (req.method !== "GET") return send(res, 405, "Method not allowed", undefined, { Allow: "GET" });
+        const sectionId = pathname.slice("/api/sections/".length);
+        if (!SECTION_IDS.has(sectionId)) return send(res, 404, JSON.stringify({ error: "not_found" }), "application/json; charset=utf-8");
+        const body = JSON.stringify(projectSectionPayload(sectionFeed, sectionId, now()));
+        return send(res, 200, body, "application/json; charset=utf-8");
       }
 
       if (pathname === "/api/calendar") {
@@ -388,84 +532,129 @@ function createApp(options = {}) {
         const timeMin = new Date(minMs);
         const timeMax = new Date(maxMs);
         try {
-          const calendarListUrl = new URL(GOOGLE_CALENDAR_LIST_ENDPOINT);
-          calendarListUrl.search = new URLSearchParams({
-            maxResults: "250", showDeleted: "false",
-            fields: "nextPageToken,items(id,summary,primary,selected,hidden,deleted,accessRole)"
-          });
-          const calendarList = await googleJson(session, calendarListUrl);
-          if (calendarList.reauthorize) return send(res, 409, JSON.stringify({ error: "reauthorization_required" }), "application/json; charset=utf-8");
-          if (!Array.isArray(calendarList.items)) throw new Error("Calendar list response invalid");
-          if (calendarList.items.some(item => !item || typeof item !== "object" || typeof item.id !== "string" || !item.id)) throw new Error("Calendar list item invalid");
-          const selectedCalendars = calendarList.items
-            .filter(item => item && !item.deleted && !item.hidden && (item.primary === true || item.selected === true))
-            .filter(item => typeof item.id === "string" && item.id);
-          if (!selectedCalendars.some(item => item.primary === true)) selectedCalendars.unshift({ id: "primary", summary: "Primary", primary: true });
-          const calendarListHasMore = Boolean(calendarList.nextPageToken);
-          const selectedCalendarCapReached = selectedCalendars.length > 50;
-          const calendarListTruncated = calendarListHasMore || selectedCalendarCapReached;
-          const calendars = selectedCalendars.slice(0, 50);
-
-          const eventGroups = await Promise.all(calendars.map(async calendar => {
-            const target = new URL(`${GOOGLE_CALENDAR_BASE}/${encodeURIComponent(calendar.id)}/events`);
-            target.search = new URLSearchParams({
-              timeMin: timeMin.toISOString(), timeMax: timeMax.toISOString(), singleEvents: "true", orderBy: "startTime", maxResults: "2500",
-              fields: "items(id,summary,start,end,location,htmlLink,status),nextPageToken"
-            });
-            try {
-              const data = await googleJson(session, target);
-              if (data.reauthorize) return { reauthorize: true, loaded: false, events: [] };
-              if (!Array.isArray(data.items)) {
-                const invalid = new Error("Calendar events response invalid");
-                invalid.code = "calendar_invalid_response";
-                throw invalid;
-              }
-              let invalidCount = 0;
-              const events = data.items.flatMap(item => {
-                if (item && item.status === "cancelled") return [];
-                const start = String(item?.start?.dateTime || item?.start?.date || "");
-                const end = String(item?.end?.dateTime || item?.end?.date || "");
-                if (!item || typeof item !== "object" || typeof item.id !== "string" || !item.id || !Number.isFinite(new Date(start).getTime()) || !Number.isFinite(new Date(end).getTime())) {
-                  invalidCount += 1;
-                  return [];
-                }
-                return [{
-                  id: opaqueEventId(calendar.id, item.id), title: String(item.summary || "Busy"), start, end,
-                  allDay: Boolean(item.start?.date && !item.start?.dateTime), location: String(item.location || ""),
-                  url: safeGoogleUrl(item.htmlLink, new Set(["calendar.google.com", "www.google.com"])),
-                  calendar: String(calendar.summary || (calendar.primary ? "Primary" : "Subscribed calendar"))
-                }];
-              });
-              return {
-                reauthorize: false, loaded: true, events, truncated: Boolean(data.nextPageToken),
-                warning: invalidCount ? { code: "calendar_invalid_events", calendar: String(calendar.summary || (calendar.primary ? "Primary" : "Subscribed calendar")) } : null
-              };
-            } catch (error) {
-              if (error.status === 401) return { reauthorize: true, loaded: false, events: [] };
-              return {
-                reauthorize: false,
-                loaded: false,
-                events: [],
-                truncated: false,
-                warning: { code: error.code || "calendar_unavailable", calendar: String(calendar.summary || (calendar.primary ? "Primary" : "Subscribed calendar")) }
-              };
+          const calendarListItems = [];
+          const seenCalendarListTokens = new Set();
+          let calendarListPageToken = "";
+          let calendarListTruncated = false;
+          for (let page = 0; page < MAX_CALENDAR_LIST_PAGES; page += 1) {
+            const calendarListUrl = new URL(GOOGLE_CALENDAR_LIST_ENDPOINT);
+            const calendarListParams = {
+              maxResults: "250", showDeleted: "false",
+              fields: "nextPageToken,items(id,summary,primary,selected,hidden,deleted,accessRole)"
+            };
+            if (calendarListPageToken) calendarListParams.pageToken = calendarListPageToken;
+            calendarListUrl.search = new URLSearchParams(calendarListParams);
+            const calendarList = await googleJson(session, calendarListUrl);
+            if (calendarList.reauthorize) return send(res, 409, JSON.stringify({ error: "reauthorization_required" }), "application/json; charset=utf-8");
+            if (!Array.isArray(calendarList.items)) throw new Error("Calendar list response invalid");
+            if (calendarList.items.some(item => !item || typeof item !== "object" || typeof item.id !== "string" || !item.id)) throw new Error("Calendar list item invalid");
+            calendarListItems.push(...calendarList.items);
+            const nextPageToken = typeof calendarList.nextPageToken === "string" ? calendarList.nextPageToken.trim() : "";
+            if (!nextPageToken) break;
+            if (seenCalendarListTokens.has(nextPageToken) || page === MAX_CALENDAR_LIST_PAGES - 1) {
+              calendarListTruncated = true;
+              break;
             }
-          }));
+            seenCalendarListTokens.add(nextPageToken);
+            calendarListPageToken = nextPageToken;
+          }
+
+          const seenCalendarIds = new Set();
+          const availableCalendars = calendarListItems
+            .filter(item => !item.deleted && !item.hidden && item.accessRole !== "none")
+            .filter(item => {
+              if (seenCalendarIds.has(item.id)) return false;
+              seenCalendarIds.add(item.id);
+              return true;
+            })
+            .sort((left, right) => Number(right.primary === true) - Number(left.primary === true));
+          if (!availableCalendars.some(item => item.primary === true || item.id === "primary")) {
+            availableCalendars.unshift({ id: "primary", summary: "Primary", primary: true });
+          }
+          const calendarCapReached = availableCalendars.length > MAX_CALENDARS;
+          const calendars = availableCalendars.slice(0, MAX_CALENDARS);
+
+          const eventGroups = await mapWithConcurrency(calendars, GOOGLE_CONCURRENCY, async calendar => {
+            const calendarName = String(calendar.summary || (calendar.primary ? "Primary" : "Subscribed calendar"));
+            const events = [];
+            const warnings = [];
+            const seenEventPageTokens = new Set();
+            let eventPageToken = "";
+            let invalidCount = 0;
+            let loadedPages = 0;
+            let truncated = false;
+            try {
+              for (let page = 0; page < MAX_CALENDAR_EVENT_PAGES; page += 1) {
+                const target = new URL(`${GOOGLE_CALENDAR_BASE}/${encodeURIComponent(calendar.id)}/events`);
+                const eventParams = {
+                  timeMin: timeMin.toISOString(), timeMax: timeMax.toISOString(), singleEvents: "true", orderBy: "startTime", maxResults: "2500",
+                  fields: "items(id,iCalUID,summary,start,end,location,htmlLink,status),nextPageToken"
+                };
+                if (eventPageToken) eventParams.pageToken = eventPageToken;
+                target.search = new URLSearchParams(eventParams);
+                const data = await googleJson(session, target);
+                if (data.reauthorize) return { reauthorize: true, loaded: false, events: [], truncated: false, warnings: [] };
+                if (!Array.isArray(data.items)) {
+                  const invalid = new Error("Calendar events response invalid");
+                  invalid.code = "calendar_invalid_response";
+                  throw invalid;
+                }
+                loadedPages += 1;
+                for (const item of data.items) {
+                  if (item && item.status === "cancelled") continue;
+                  const start = String(item?.start?.dateTime || item?.start?.date || "");
+                  const end = String(item?.end?.dateTime || item?.end?.date || "");
+                  if (!item || typeof item !== "object" || typeof item.id !== "string" || !item.id || !Number.isFinite(new Date(start).getTime()) || !Number.isFinite(new Date(end).getTime())) {
+                    invalidCount += 1;
+                    continue;
+                  }
+                  events.push({
+                    id: opaqueEventId(calendar.id, item.id), title: String(item.summary || "Busy"), start, end,
+                    allDay: Boolean(item.start?.date && !item.start?.dateTime), location: String(item.location || ""),
+                    url: safeGoogleUrl(item.htmlLink, new Set(["calendar.google.com", "www.google.com"])),
+                    calendar: calendarName,
+                    dedupeKey: eventDedupeKey(item, start, end)
+                  });
+                }
+                const nextPageToken = typeof data.nextPageToken === "string" ? data.nextPageToken.trim() : "";
+                if (!nextPageToken) break;
+                if (seenEventPageTokens.has(nextPageToken) || page === MAX_CALENDAR_EVENT_PAGES - 1) {
+                  truncated = true;
+                  warnings.push({ code: "calendar_events_truncated", calendar: calendarName });
+                  break;
+                }
+                seenEventPageTokens.add(nextPageToken);
+                eventPageToken = nextPageToken;
+              }
+              if (invalidCount) warnings.push({ code: "calendar_invalid_events", calendar: calendarName });
+              return { reauthorize: false, loaded: true, events, truncated, warnings };
+            } catch (error) {
+              if (error.status === 401) return { reauthorize: true, loaded: false, events: [], truncated: false, warnings: [] };
+              warnings.push({ code: error.code || "calendar_unavailable", calendar: calendarName });
+              return { reauthorize: false, loaded: loadedPages > 0, events, truncated: loadedPages > 0 || truncated, warnings };
+            }
+          });
           if (eventGroups.some(group => group.reauthorize)) return send(res, 409, JSON.stringify({ error: "reauthorization_required" }), "application/json; charset=utf-8");
-          const events = eventGroups.flatMap(group => group.events).sort((left, right) => new Date(left.start).getTime() - new Date(right.start).getTime());
-          const warnings = eventGroups.map(group => group.warning).filter(Boolean);
-          if (calendarListHasMore) warnings.push({ code: "calendar_list_truncated", calendar: "Additional calendars were not inspected; selected calendars may be missing" });
-          if (selectedCalendarCapReached) warnings.push({ code: "selected_calendar_limit", calendar: "More than 50 known selected calendars" });
+          const seenEvents = new Set();
+          const events = eventGroups.flatMap(group => group.events).filter(event => {
+            if (seenEvents.has(event.dedupeKey)) return false;
+            seenEvents.add(event.dedupeKey);
+            delete event.dedupeKey;
+            return true;
+          }).sort((left, right) => new Date(left.start).getTime() - new Date(right.start).getTime());
+          const warnings = eventGroups.flatMap(group => group.warnings);
+          if (calendarListTruncated) warnings.push({ code: "calendar_list_truncated", calendar: "Additional calendars were not inspected" });
+          if (calendarCapReached) warnings.push({ code: "calendar_limit", calendar: `More than ${MAX_CALENDARS} accessible calendars` });
           const loadedCount = eventGroups.filter(group => group.loaded).length;
-          const source = calendarListHasMore
-            ? `Google Calendar · ${loadedCount} selected calendars loaded; additional calendars were not inspected and selected calendars may be missing · read-only`
-            : selectedCalendarCapReached
-              ? `Google Calendar · ${loadedCount} of ${selectedCalendars.length} known selected calendars loaded; limited to 50 · read-only`
-            : `Google Calendar · ${loadedCount} of ${calendars.length} selected calendar${calendars.length === 1 ? "" : "s"} loaded · read-only`;
+          const source = calendarListTruncated
+            ? `Google Calendar · ${loadedCount} calendars loaded; additional calendars were not inspected · read-only`
+            : calendarCapReached
+              ? `Google Calendar · ${loadedCount} of ${availableCalendars.length} accessible calendars loaded; limited to ${MAX_CALENDARS} · read-only`
+              : `Google Calendar · ${loadedCount} of ${calendars.length} accessible calendar${calendars.length === 1 ? "" : "s"} loaded · read-only`;
           return send(res, 200, JSON.stringify({
             source,
             partial: warnings.length > 0,
-            truncated: calendarListTruncated || eventGroups.some(group => group.truncated),
+            truncated: calendarListTruncated || calendarCapReached || eventGroups.some(group => group.truncated),
             warnings,
             events
           }), "application/json; charset=utf-8");
@@ -478,47 +667,85 @@ function createApp(options = {}) {
       if (pathname === "/api/drive") {
         if (req.method !== "GET") return send(res, 405, "Method not allowed", undefined, { Allow: "GET" });
         const query = String(requestUrl.searchParams.get("q") || "").trim().slice(0, 100);
-        const escaped = query.replace(/['\\]/g, character => `\\${character}`);
-        const target = new URL(GOOGLE_DRIVE_ENDPOINT);
-        const params = { pageSize: "100", orderBy: "modifiedTime desc", fields: "nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,iconLink)" };
-        params.q = query ? `trashed = false and name contains '${escaped}'` : "trashed = false";
-        target.search = new URLSearchParams(params);
+        const normalizedQuery = query.toLowerCase();
         try {
-          const data = await googleJson(session, target);
-          if (data.reauthorize) return send(res, 409, JSON.stringify({ error: "reauthorization_required" }), "application/json; charset=utf-8");
-          if (!Array.isArray(data.files)) throw new Error("Drive files response invalid");
-          if (data.files.some(item => !item || typeof item !== "object" || typeof item.id !== "string" || !item.id || typeof item.name !== "string" || !item.name)) throw new Error("Drive file item invalid");
-          const files = data.files.map(item => ({
-            id: String(item.id || ""), name: String(item.name || "Untitled"), mimeType: String(item.mimeType || ""),
-            modifiedTime: String(item.modifiedTime || ""),
-            url: safeGoogleUrl(item.webViewLink, new Set(["drive.google.com", "docs.google.com"])),
-            icon: safeGoogleUrl(item.iconLink, new Set(["drive-thirdparty.googleusercontent.com", "lh3.googleusercontent.com"]))
-          }));
-          const truncated = Boolean(data.nextPageToken);
+          const files = [];
+          const seenFileIds = new Set();
+          const seenDrivePageTokens = new Set();
+          const warnings = [];
+          let drivePageToken = "";
+          let pageCount = 0;
+          let inspectedFileCount = 0;
+          let truncated = false;
+          let incompleteSearch = false;
+          for (let page = 0; page < MAX_DRIVE_PAGES; page += 1) {
+            const target = new URL(GOOGLE_DRIVE_ENDPOINT);
+            const params = {
+              pageSize: "100", orderBy: "modifiedTime desc", corpora: "allDrives", spaces: "drive",
+              includeItemsFromAllDrives: "true", supportsAllDrives: "true",
+              fields: "nextPageToken,incompleteSearch,files(id,name,mimeType,modifiedTime,webViewLink,iconLink)"
+            };
+            params.q = "trashed = false";
+            if (drivePageToken) params.pageToken = drivePageToken;
+            target.search = new URLSearchParams(params);
+            const data = await googleJson(session, target);
+            if (data.reauthorize) return send(res, 409, JSON.stringify({ error: "reauthorization_required" }), "application/json; charset=utf-8");
+            if (!Array.isArray(data.files)) throw new Error("Drive files response invalid");
+            if (data.files.some(item => !item || typeof item !== "object" || typeof item.id !== "string" || !item.id || typeof item.name !== "string" || !item.name)) throw new Error("Drive file item invalid");
+            pageCount += 1;
+            incompleteSearch ||= data.incompleteSearch === true;
+            for (const item of data.files) {
+              if (seenFileIds.has(item.id)) continue;
+              seenFileIds.add(item.id);
+              inspectedFileCount += 1;
+              if (normalizedQuery && !item.name.toLowerCase().includes(normalizedQuery)) continue;
+              files.push({
+                id: String(item.id), name: String(item.name), mimeType: String(item.mimeType || ""),
+                modifiedTime: String(item.modifiedTime || ""),
+                url: safeGoogleUrl(item.webViewLink, new Set(["drive.google.com", "docs.google.com"])),
+                icon: safeGoogleUrl(item.iconLink, new Set(["drive-thirdparty.googleusercontent.com", "lh3.googleusercontent.com"]))
+              });
+            }
+            const nextPageToken = typeof data.nextPageToken === "string" ? data.nextPageToken.trim() : "";
+            if (!nextPageToken) break;
+            if (seenDrivePageTokens.has(nextPageToken) || page === MAX_DRIVE_PAGES - 1) {
+              truncated = true;
+              warnings.push({ code: "drive_results_truncated" });
+              break;
+            }
+            seenDrivePageTokens.add(nextPageToken);
+            drivePageToken = nextPageToken;
+          }
+          if (incompleteSearch) {
+            truncated = true;
+            warnings.push({ code: "drive_incomplete_search" });
+          }
+          const resultLabel = normalizedQuery
+            ? `${files.length} filename substring match${files.length === 1 ? "" : "es"} from ${inspectedFileCount} file${inspectedFileCount === 1 ? "" : "s"} inspected`
+            : `${files.length} file${files.length === 1 ? "" : "s"} returned`;
           const source = truncated
-            ? `Google Drive metadata · first page returned ${files.length} filename match${files.length === 1 ? "" : "es"}; additional pages exist · read-only`
-            : `Google Drive metadata · ${files.length} filename match${files.length === 1 ? "" : "es"} returned · read-only`;
-          return send(res, 200, JSON.stringify({ source, truncated, files }), "application/json; charset=utf-8");
+            ? `Google Drive metadata · ${resultLabel} across ${pageCount} page${pageCount === 1 ? "" : "s"}; results may be incomplete · read-only`
+            : `Google Drive metadata · ${resultLabel} across ${pageCount} page${pageCount === 1 ? "" : "s"} · read-only`;
+          return send(res, 200, JSON.stringify({ source, partial: warnings.length > 0, truncated, warnings, files }), "application/json; charset=utf-8");
         } catch (error) {
           const status = error.status === 401 ? 409 : 502;
           return send(res, status, JSON.stringify({ error: status === 409 ? "reauthorization_required" : "drive_unavailable" }), "application/json; charset=utf-8");
         }
       }
 
+      if (isApiRequest) return send(res, 404, JSON.stringify({ error: "not_found" }), "application/json; charset=utf-8");
+
       if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, "Method not allowed", undefined, { Allow: "GET, HEAD" });
 
       const relative = pathname.replace(/^\/+/, "");
       const segments = relative.split("/").filter(Boolean);
       const hasHiddenSegment = segments.some(segment => segment.startsWith("."));
-      const isCompiledAsset = segments[0] === "assets" && segments.length > 1;
-      const isSyntheticFixture = relative === "data/spartan-incubator.fixture.json";
       const isRootAsset = ROOT_ASSETS.has(relative || "index.html");
       const isDeepLink = !relative || relative.endsWith("/") || !path.posix.extname(relative);
-      const reservedMissingPath = ["assets", "data", "boss", "auth", "login", "logout", "__test"].includes(segments[0]);
+      const reservedMissingPath = ["api", "assets", "data", "boss", "auth", "login", "logout", "__test"].includes(segments[0]);
       if (hasHiddenSegment) return send(res, 404, "Not found");
       let selected;
       if (isRootAsset) selected = relative || "index.html";
-      else if (isCompiledAsset || isSyntheticFixture) selected = relative;
       else if (isDeepLink && !reservedMissingPath) selected = "index.html";
       else return send(res, 404, "Not found");
       const filePath = path.resolve(rootDir, selected);
@@ -543,8 +770,9 @@ function createApp(options = {}) {
 }
 
 if (require.main === module) {
+  if (process.env.UTAMPA_SYNTHETIC_OIDC) throw new Error("UTAMPA_SYNTHETIC_OIDC is forbidden in the deployed server entrypoint");
   const port = Number(process.env.PORT || 3000);
-  createApp().listen(port, "0.0.0.0", () => console.log(`UTampa Faculty OS listening on ${port}`));
+  createApp().listen(port, "0.0.0.0", () => console.log(`My Work server listening on ${port}`));
 }
 
-module.exports = { COOKIE_NAME, TRANSACTION_COOKIE, createApp, createGoogleOAuthProvider, createSession, safeNext, signInPage };
+module.exports = { COOKIE_NAME, TRANSACTION_COOKIE, createApp, createGoogleOAuthProvider, createSession, createSyntheticOAuthProvider, safeNext, signInPage };

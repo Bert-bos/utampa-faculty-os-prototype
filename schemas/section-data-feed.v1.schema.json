@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://utampa.invalid/schemas/section-data-feed.v1.schema.json",
+  "title": "UTampa section data feed v1",
+  "description": "Read-only, provenance-bearing data for Today, Teaching, Research, Service, and People.",
+  "type": "object",
+  "required": ["contractVersion", "feedId", "generatedAt", "sources", "sections"],
+  "properties": {
+    "contractVersion": { "const": "utampa-section-feed.v1" },
+    "feedId": { "$ref": "#/$defs/feedId" },
+    "generatedAt": { "$ref": "#/$defs/timestamp" },
+    "sources": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/source" }
+    },
+    "sections": {
+      "type": "object",
+      "required": ["today", "teaching", "research", "service", "people"],
+      "additionalProperties": false,
+      "properties": {
+        "today": { "$ref": "#/$defs/todaySection" },
+        "teaching": { "$ref": "#/$defs/teachingSection" },
+        "research": { "$ref": "#/$defs/researchSection" },
+        "service": { "$ref": "#/$defs/serviceSection" },
+        "people": { "$ref": "#/$defs/peopleSection" }
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "maxLength": 160,
+      "pattern": "^[a-z][a-z0-9]*(?::[a-z0-9][a-z0-9._-]*)+$"
+    },
+    "feedId": { "type": "string", "maxLength": 160, "pattern": "^feed:[a-z0-9][a-z0-9._-]*(?::[a-z0-9][a-z0-9._-]*)*$" },
+    "sourceId": { "type": "string", "maxLength": 160, "pattern": "^source:[a-z0-9][a-z0-9._-]*(?::[a-z0-9][a-z0-9._-]*)*$" },
+    "itemId": { "type": "string", "maxLength": 160, "pattern": "^item:[a-z0-9][a-z0-9._-]*(?::[a-z0-9][a-z0-9._-]*)*$" },
+    "entityId": { "type": "string", "maxLength": 160, "pattern": "^entity:[a-z0-9][a-z0-9._-]*(?::[a-z0-9][a-z0-9._-]*)*$" },
+    "recordId": { "type": "string", "maxLength": 160, "pattern": "^record:[a-z0-9][a-z0-9._-]*(?::[a-z0-9][a-z0-9._-]*)*$" },
+    "safeSourceUrl": {
+      "type": "string",
+      "pattern": "^https://(?:calendar\\.google\\.com|docs\\.google\\.com|drive\\.google\\.com)(?:/[^?#]*)?$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?(?:Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "nullableTimestamp": {
+      "oneOf": [
+        { "$ref": "#/$defs/timestamp" },
+        { "type": "null" }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "required": ["id", "label", "kind", "readOnly", "asOf"],
+      "properties": {
+        "id": { "$ref": "#/$defs/sourceId" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "kind": {
+          "enum": ["private-json", "approved-export", "google-calendar", "google-drive-metadata", "airtable-readonly", "manual-reviewed"]
+        },
+        "readOnly": { "const": true },
+        "asOf": { "$ref": "#/$defs/nullableTimestamp" }
+      },
+      "additionalProperties": false
+    },
+    "completeness": {
+      "type": "object",
+      "required": ["status", "expectedCount", "receivedCount"],
+      "properties": {
+        "status": { "enum": ["unconfigured", "complete", "partial", "unavailable"] },
+        "expectedCount": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "receivedCount": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 500 }
+      },
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["sourceId", "recordId", "observedAt", "method"],
+      "properties": {
+        "sourceId": { "$ref": "#/$defs/sourceId" },
+        "observedAt": { "$ref": "#/$defs/timestamp" },
+        "method": { "enum": ["direct", "derived", "manual-reviewed"] },
+        "recordId": { "$ref": "#/$defs/recordId" },
+        "note": { "type": "string", "minLength": 1, "maxLength": 500 }
+      },
+      "additionalProperties": false
+    },
+    "action": {
+      "type": "object",
+      "required": ["type", "label"],
+      "properties": {
+        "type": {
+          "enum": ["open_details", "open_source", "open_section", "prepare", "complete_local", "dismiss_local", "stage_route_local"]
+        },
+        "label": {
+          "enum": ["Open details", "Open source", "Open section", "Prepare locally", "Complete locally", "Dismiss locally", "Stage route locally"]
+        },
+        "href": { "$ref": "#/$defs/safeSourceUrl" },
+        "targetSection": { "enum": ["today", "teaching", "research", "service", "people"] }
+      },
+      "additionalProperties": false
+    },
+    "item": {
+      "type": "object",
+      "required": ["id", "section", "category", "title", "status", "priority", "needsOwner", "asOf", "freshness", "staleAfter", "sourceRef", "provenance", "actions"],
+      "properties": {
+        "id": { "$ref": "#/$defs/itemId" },
+        "entityId": { "$ref": "#/$defs/entityId" },
+        "section": { "enum": ["today", "teaching", "research", "service", "people"] },
+        "category": { "type": "string" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "summary": {
+          "oneOf": [
+            { "type": "string", "minLength": 1, "maxLength": 1000 },
+            { "type": "null" }
+          ]
+        },
+        "status": { "enum": ["open", "blocked", "scheduled", "done", "archived", "unknown"] },
+        "needsOwner": { "type": "boolean" },
+        "asOf": { "$ref": "#/$defs/timestamp" },
+        "freshness": { "enum": ["current", "stale", "unknown"] },
+        "staleAfter": { "$ref": "#/$defs/nullableTimestamp" },
+        "dueAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "startAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "endAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "priority": {
+          "oneOf": [
+            { "type": "integer", "minimum": 1, "maximum": 5 },
+            { "type": "null" }
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 40 }
+        },
+        "sourceRef": { "$ref": "#/$defs/recordId" },
+        "sourceUrl": {
+          "oneOf": [
+            { "$ref": "#/$defs/safeSourceUrl" },
+            { "type": "null" }
+          ]
+        },
+        "provenance": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": { "$ref": "#/$defs/provenance" }
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 10,
+          "items": { "$ref": "#/$defs/action" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "section": {
+      "type": "object",
+      "required": ["id", "asOf", "freshness", "staleAfter", "completeness", "sourceIds", "allowedActions", "items"],
+      "properties": {
+        "id": { "enum": ["today", "teaching", "research", "service", "people"] },
+        "asOf": { "$ref": "#/$defs/nullableTimestamp" },
+        "freshness": { "enum": ["current", "stale", "unknown"] },
+        "staleAfter": { "$ref": "#/$defs/nullableTimestamp" },
+        "completeness": { "$ref": "#/$defs/completeness" },
+        "sourceIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/sourceId" }
+        },
+        "allowedActions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": ["open_details", "open_source", "open_section", "prepare", "complete_local", "dismiss_local", "stage_route_local"]
+          }
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": { "$ref": "#/$defs/item" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "todaySection": {
+      "allOf": [
+        { "$ref": "#/$defs/section" },
+        {
+          "type": "object",
+          "properties": {
+            "id": { "const": "today" },
+            "items": { "type": "array", "items": { "type": "object", "properties": { "section": { "const": "today" }, "category": { "enum": ["task", "deadline", "decision", "event"] } } } }
+          }
+        }
+      ]
+    },
+    "teachingSection": {
+      "allOf": [
+        { "$ref": "#/$defs/section" },
+        {
+          "type": "object",
+          "properties": {
+            "id": { "const": "teaching" },
+            "items": { "type": "array", "items": { "type": "object", "properties": { "section": { "const": "teaching" }, "category": { "enum": ["course", "session", "material", "deadline", "task"] } } } }
+          }
+        }
+      ]
+    },
+    "researchSection": {
+      "allOf": [
+        { "$ref": "#/$defs/section" },
+        {
+          "type": "object",
+          "properties": {
+            "id": { "const": "research" },
+            "items": { "type": "array", "items": { "type": "object", "properties": { "section": { "const": "research" }, "category": { "enum": ["project", "milestone", "deliverable", "deadline", "task"] } } } }
+          }
+        }
+      ]
+    },
+    "serviceSection": {
+      "allOf": [
+        { "$ref": "#/$defs/section" },
+        {
+          "type": "object",
+          "properties": {
+            "id": { "const": "service" },
+            "items": { "type": "array", "items": { "type": "object", "properties": { "section": { "const": "service" }, "category": { "enum": ["program", "commitment", "need", "win", "recruiting", "media-review", "task"] } } } }
+          }
+        }
+      ]
+    },
+    "peopleSection": {
+      "allOf": [
+        { "$ref": "#/$defs/section" },
+        {
+          "type": "object",
+          "properties": {
+            "id": { "const": "people" },
+            "items": { "type": "array", "items": { "type": "object", "properties": { "section": { "const": "people" }, "category": { "enum": ["person", "relationship", "handoff", "task"] } } } }
+          }
+        }
+      ]
+    }
+  }
+}

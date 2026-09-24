@@ -3,7 +3,15 @@
   if (window.__utampaLiveInitialized) return;
   window.__utampaLiveInitialized = true;
   var STORAGE_KEY = "utampa-faculty-os-actions-v1";
-  var state = readState();
+  var SECTION_ACTION_STORAGE_KEY = "utampa-section-actions-v1";
+  try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
+  var sectionActionState = readSectionActionState();
+  var sectionCache = {};
+  var sectionLoadGeneration = {};
+  var sectionPayloadTiming = new WeakMap();
+  var sectionRequestId = 0;
+  var sectionFreshnessTimer = null;
+  var sessionAuthRequired = false;
   var activeNativeShade = null;
   var lastNativeTrigger = null;
   var headerCalendarResult = null;
@@ -14,25 +22,39 @@
   var activePageTimer = null;
   var observerWorkTimer = null;
 
-  function readState() {
+  function isTypedSectionActionId(value, prefix) {
+    return typeof value === "string" && value.length <= 160 && new RegExp("^" + prefix + "(?::[a-z0-9][a-z0-9._-]*)+$").test(value);
+  }
+  function readSectionActionState() {
     try {
-      var parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+      var stored = localStorage.getItem(SECTION_ACTION_STORAGE_KEY);
+      var parsed = JSON.parse(stored || "{}");
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { localStorage.removeItem(SECTION_ACTION_STORAGE_KEY); return {}; }
       var clean = {};
-      Object.keys(parsed).forEach(function (key) {
+      Object.keys(parsed).slice(0, 500).forEach(function (key) {
         var record = parsed[key];
-        if (!record || typeof record !== "object" || typeof record.status !== "string") return;
-        clean[String(key).slice(0, 240)] = {
-          status: record.status, target: typeof record.target === "string" ? record.target.slice(0, 120) : "",
-          updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : ""
+        if (!record || typeof record !== "object" || !isTypedSectionActionId(record.feedId, "feed") || !isTypedSectionActionId(record.itemId, "item")) return;
+        if (!/^(complete_local|dismiss_local|stage_route_local)$/.test(record.actionType || "")) return;
+        if (key !== record.feedId + "|" + record.itemId || !/^(today|teaching|research|service|people)$/.test(record.section || "")) return;
+        var target = record.target === undefined ? "" : record.target;
+        if (typeof target !== "string") return;
+        if (record.actionType === "stage_route_local" ? !/^(BOS|UTampa|Entrepreneurship Professor)$/.test(target) : target !== "") return;
+        if (typeof record.updatedAt !== "string" || record.updatedAt.length > 40 || !Number.isFinite(Date.parse(record.updatedAt))) return;
+        clean[key.slice(0, 360)] = {
+          feedId: record.feedId.slice(0, 160), itemId: record.itemId.slice(0, 160),
+          section: record.section,
+          actionType: record.actionType,
+          target: target,
+          updatedAt: record.updatedAt
         };
       });
+      var sanitized = JSON.stringify(clean);
+      if (stored !== null && sanitized !== stored) localStorage.setItem(SECTION_ACTION_STORAGE_KEY, sanitized);
       return clean;
-    }
-    catch (_) { return {}; }
+    } catch (_) { try { localStorage.removeItem(SECTION_ACTION_STORAGE_KEY); } catch (_) {} return {}; }
   }
-  function writeState() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); return true; }
+  function writeSectionActionState() {
+    try { localStorage.setItem(SECTION_ACTION_STORAGE_KEY, JSON.stringify(sectionActionState)); return true; }
     catch (_) { return false; }
   }
   function escapeHtml(value) {
@@ -63,12 +85,16 @@
   async function requestJson(path) {
     var response = await fetch(path, { credentials: "same-origin", headers: { Accept: "application/json" } });
     var body = await response.json().catch(function () { return {}; });
+    if (response.status === 401) { renderSessionEnded(); return { authRequired: true }; }
     if (response.status === 409 && body.error === "reauthorization_required") return { reauthorize: true };
     if (!response.ok) throw new Error(body.error || "Request failed");
     return body;
   }
   function reconnectMarkup() {
     return '<div class="ut-empty" role="status" aria-live="polite" aria-atomic="true"><h3>Reconnect Google to finish setup</h3><p>Your current Google authorization is unavailable or does not include the required Calendar and Drive read-only access.</p><a class="ut-primary" href="/auth/google?next=' + encodeURIComponent(location.pathname + location.search) + '">Reconnect Google</a></div>';
+  }
+  function signInMarkup() {
+    return '<div class="ut-empty" role="status" aria-live="polite" aria-atomic="true"><h3>Sign in again</h3><p>Your private dashboard session has ended.</p><a class="ut-primary" href="/login?next=' + encodeURIComponent(location.pathname + location.search) + '">Open My Work Login</a></div>';
   }
   function focusableElements(container) {
     return Array.prototype.filter.call(container.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'), function (node) {
@@ -128,7 +154,7 @@
   }
   function loadingDrawer(title) { return openDrawer(title, '<div class="ut-loading" role="status" aria-live="polite">Loading authorized data…</div>', "AUTHORIZED READ-ONLY SOURCES"); }
   function mobileActionsMarkup() {
-    return '<div class="ut-mobile-actions" aria-label="Dashboard actions"><button class="ut-mobile-actions-center">Actions' + (Object.keys(state).length ? ' (' + Object.keys(state).length + ')' : '') + '</button><button class="ut-mobile-search">Search</button><button class="ut-mobile-prepare">Prepare me</button></div>';
+    return '<div class="ut-mobile-actions" aria-label="Dashboard actions"><button class="ut-mobile-actions-center">Actions' + (Object.keys(sectionActionState).length ? ' (' + Object.keys(sectionActionState).length + ')' : '') + '</button><button class="ut-mobile-search">Search</button><button class="ut-mobile-prepare">Prepare me</button></div>';
   }
   function wireMobileActions(container) {
     var actions = container.querySelector(".ut-mobile-actions-center");
@@ -143,11 +169,6 @@
     var details = [event.calendar, event.location].filter(Boolean).map(function (value) { return escapeHtml(value); }).join(" · ");
     return '<article class="ut-event"><div><time>' + escapeHtml(formatEventTime(event)) + '</time><h3>' + escapeHtml(event.title) + '</h3>' + (details ? '<p>' + details + '</p>' : "") + '</div><div class="ut-inline-actions"><button data-prepare-event="' + escapeHtml(event.title) + '">Prepare me</button>' + link + '</div></article>';
   }
-  function serviceEventMarkup(event) {
-    var link = event.url ? '<a href="' + escapeHtml(event.url) + '" target="_blank" rel="noopener">Open in Google Calendar</a>' : "";
-    var source = event.calendar ? '<p>' + escapeHtml(event.calendar) + '</p>' : "";
-    return '<article class="ut-event ut-service-event"><div><time>' + escapeHtml(formatEventTime(event)) + '</time><h3>' + escapeHtml(event.title) + '</h3>' + source + '</div><div class="ut-inline-actions">' + link + '</div></article>';
-  }
   function fileMarkup(file) {
     var link = file.url ? '<a href="' + escapeHtml(file.url) + '" target="_blank" rel="noopener">Open</a>' : "";
     return '<article class="ut-file"><div><h3>' + escapeHtml(file.name) + '</h3><p>Modified ' + escapeHtml(formatDate(file.modifiedTime, true)) + '</p></div>' + link + '</article>';
@@ -158,7 +179,7 @@
   }
   async function loadCalendar() {
     var result = await requestJson("/api/calendar");
-    if (result.reauthorize) return result;
+    if (result.reauthorize || result.authRequired) return result;
     if (!Array.isArray(result.events)) throw new Error("Calendar response invalid");
     return {
       events: result.events, source: result.source,
@@ -181,15 +202,18 @@
     return '<div class="ut-empty"><p>No matching Drive filenames were found.</p></div>';
   }
   async function showCalendarPanel() {
+    if (sessionAuthRequired) { renderSessionEnded(); return; }
     document.body.classList.add("ut-live-managed", "ut-live-calendar");
     var shell = document.querySelector(".topShell");
     if (!shell) return;
+    suppressNativeShell(shell);
     var managed = shell.querySelector(".ut-live-view"); if (managed) managed.remove();
+    var sourceStatus = shell.querySelector(".ut-source-status"); if (sourceStatus) sourceStatus.remove();
     var panel = shell.querySelector(".ut-calendar-panel");
     if (!panel) {
       panel = document.createElement("section");
       panel.className = "ut-calendar-panel";
-      panel.innerHTML = '<div class="ut-panel-head"><div><p class="eyebrow">GOOGLE CALENDAR · READ-ONLY</p><h2>Calendar</h2><span>Events visible through authorized Google Calendar access for bert@bertseither.com, including selected or subscribed calendars. No University account or institutional system is connected.</span></div><button class="ut-refresh">Refresh</button></div>' + mobileActionsMarkup() + '<div class="ut-calendar-content" role="status" aria-live="polite" aria-atomic="true"><div class="ut-loading">Loading authorized calendar…</div></div>';
+      panel.innerHTML = '<div class="ut-panel-head"><div><p class="eyebrow">GOOGLE CALENDAR · READ-ONLY</p><h2>Calendar</h2><span>Events visible through your authorized Google Calendar access, including selected or subscribed calendars. No University account or institutional system is connected.</span></div><button class="ut-refresh">Refresh</button></div>' + mobileActionsMarkup() + '<div class="ut-calendar-content" role="status" aria-live="polite" aria-atomic="true"><div class="ut-loading">Loading authorized calendar…</div></div>';
       shell.prepend(panel);
       panel.querySelector(".ut-refresh").addEventListener("click", showCalendarPanel);
       wireMobileActions(panel);
@@ -202,7 +226,8 @@
     try {
       var result = await loadCalendar();
       if (!panel.isConnected || panel._utCalendarRequestId !== requestId) return;
-      if (result.reauthorize) content.innerHTML = reconnectMarkup();
+      if (result.authRequired) content.innerHTML = signInMarkup();
+      else if (result.reauthorize) content.innerHTML = reconnectMarkup();
       else if (!result.events.length && calendarIncomplete(result)) content.innerHTML = calendarQualityMarkup(result) + '<div class="ut-empty"><h3>No complete result available</h3><p>No events were returned from the calendars that loaded. Retry before treating this as an empty calendar.</p></div><p class="ut-source">Source: ' + escapeHtml(result.source) + '</p>';
       else if (!result.events.length) content.innerHTML = '<div class="ut-empty"><h3>No events found</h3><p>Your selected Google calendars returned no events in the current authorized Calendar window.</p></div><p class="ut-source">Source: ' + escapeHtml(result.source) + '</p>';
       else content.innerHTML = calendarQualityMarkup(result) + '<div class="ut-event-list">' + result.events.map(eventMarkup).join("") + '</div><p class="ut-source">Source: ' + escapeHtml(result.source) + '</p>';
@@ -214,24 +239,341 @@
       if (panel.isConnected && panel._utCalendarRequestId === requestId) panel.removeAttribute("aria-busy");
     }
   }
-  function restoreNativeView() {
-    document.body.classList.remove("ut-live-managed", "ut-live-calendar");
-    document.querySelectorAll(".ut-live-view,.ut-calendar-panel").forEach(function (node) { node.remove(); });
+  function suppressNativeShell(shell) {
+    if (!shell) return;
+    Array.prototype.forEach.call(shell.children, function (node) {
+      if (node.matches(".ut-live-view,.ut-calendar-panel,.ut-source-status")) return;
+      node.hidden = true; node.inert = true; node.setAttribute("aria-hidden", "true"); node.dataset.utSuppressedNative = "1";
+    });
   }
-  function sourceStatus(page) {
+  function restoreNativeView() {
+    if (sectionFreshnessTimer !== null) { clearTimeout(sectionFreshnessTimer); sectionFreshnessTimer = null; }
+    document.body.classList.remove("ut-live-managed", "ut-live-calendar");
+    document.querySelectorAll(".ut-live-view,.ut-calendar-panel,.ut-source-status").forEach(function (node) { node.remove(); });
+    suppressNativeShell(document.querySelector(".topShell"));
+  }
+  var PAGE_TO_SECTION = { Today: "today", Teaching: "teaching", Research: "research", Service: "service", People: "people" };
+  var SECTION_TO_PAGE = { today: "Today", teaching: "Teaching", research: "Research", service: "Service", people: "People" };
+  function sectionFreshUntil(payload) {
+    if (!payload || !payload.section) return null;
+    var candidates = [];
+    var section = payload.section;
+    if (section.freshness === "current" && section.staleAfter) candidates.push(Date.parse(section.staleAfter));
+    (Array.isArray(section.items) ? section.items : []).forEach(function (item) {
+      if (item && item.freshness === "current" && item.staleAfter) candidates.push(Date.parse(item.staleAfter));
+    });
+    candidates = candidates.filter(Number.isFinite);
+    return candidates.length ? Math.min.apply(Math, candidates) : null;
+  }
+  function monotonicNow() {
+    return window.performance && typeof window.performance.now === "function" ? window.performance.now() : Date.now();
+  }
+  function sectionFreshForMs(payload) {
+    var freshUntil = sectionFreshUntil(payload);
+    if (freshUntil === null) return null;
+    var servedAt = Date.parse(payload && payload.servedAt);
+    return Math.max(0, freshUntil - (Number.isFinite(servedAt) ? servedAt : Date.now()));
+  }
+  function sectionRemainingFreshMs(payload) {
+    var freshForMs = sectionFreshForMs(payload);
+    if (freshForMs === null) return null;
+    var timing = sectionPayloadTiming.get(payload);
+    if (!timing) return freshForMs;
+    return Math.max(0, timing.freshForMs - Math.max(0, monotonicNow() - timing.loadedMonotonic));
+  }
+  function downgradeExpiredSectionFreshness(payload, nowMs) {
+    if (!payload || !payload.section) return payload;
+    var section = payload.section;
+    var items = Array.isArray(section.items) ? section.items : [];
+    items.forEach(function (item) {
+      if (item && item.freshness === "current" && item.staleAfter && Date.parse(item.staleAfter) <= nowMs) item.freshness = "stale";
+    });
+    if (items.length) {
+      var values = items.map(function (item) { return item.freshness; });
+      section.freshness = values.some(function (value) { return value === "stale"; })
+        ? "stale"
+        : values.every(function (value) { return value === "current"; }) ? "current" : "unknown";
+      section.staleAfter = section.freshness === "unknown" ? null : items.map(function (item) { return item.staleAfter; }).filter(Boolean).sort(function (left, right) { return Date.parse(left) - Date.parse(right); })[0] || null;
+    } else if (section.freshness === "current" && section.staleAfter && Date.parse(section.staleAfter) <= nowMs) section.freshness = "stale";
+    return payload;
+  }
+  function scheduleSectionFreshness(page, payload) {
+    if (sectionFreshnessTimer !== null) clearTimeout(sectionFreshnessTimer);
+    sectionFreshnessTimer = null;
+    var freshForMs = sectionRemainingFreshMs(payload);
+    if (freshForMs === null) return;
+    var delay = Math.min(freshForMs + 50, 2147483000);
+    sectionFreshnessTimer = setTimeout(function () {
+      sectionFreshnessTimer = null;
+      if (currentPage() === page) showNativeStatus(page, true);
+    }, delay);
+  }
+  function renderSessionEnded() {
+    sessionAuthRequired = true;
+    sectionRequestId += 1;
+    headerCalendarRequestId += 1;
+    headerCalendarResult = { authRequired: true };
+    headerCalendarError = false;
+    sectionCache = {};
+    sectionLoadGeneration = {};
+    sectionActionState = {};
+    try { localStorage.removeItem(SECTION_ACTION_STORAGE_KEY); localStorage.removeItem(STORAGE_KEY); } catch (_) {}
+    if (sectionFreshnessTimer !== null) { clearTimeout(sectionFreshnessTimer); sectionFreshnessTimer = null; }
+    document.querySelectorAll(".drawerShade").forEach(function (shade) {
+      restoreInert(shade);
+      if (activeNativeShade === shade) activeNativeShade = null;
+      shade.remove();
+    });
+    renderHeaderCountdown();
+    var shell = document.querySelector(".topShell");
+    if (!shell) return;
+    var page = currentPage() || "Today";
+    var existing = shell.querySelector('.ut-session-ended[data-page="' + page + '"]');
+    if (existing) return;
+    document.body.classList.remove("ut-live-managed", "ut-live-calendar");
+    shell.querySelectorAll(".ut-live-view,.ut-calendar-panel,.ut-source-status").forEach(function (node) { node.remove(); });
+    suppressNativeShell(shell);
+    Object.keys(PAGE_TO_SECTION).forEach(function (sectionPage) { setTrustedSectionCount(sectionPage, null); });
+    var banner = document.createElement("section"); banner.className = "ut-source-status"; banner.dataset.page = page;
+    banner.innerHTML = '<div><strong>SIGN IN REQUIRED</strong><span>Your private dashboard session has ended. Previously displayed source data was removed.</span></div>';
+    var view = document.createElement("section"); view.className = "ut-live-view ut-unavailable-view ut-session-ended"; view.dataset.page = page; view.innerHTML = signInMarkup();
+    shell.prepend(banner); shell.appendChild(view);
+  }
+  function sectionDefinition(page) {
     return {
-      Today: ["PROTOTYPE DECISION WORKSPACE", "Ranking and work items are prototype content until an approved work-item feed is connected."],
-      Teaching: ["PROTOTYPE COURSE WORKSPACE", "Canvas and student systems are not connected. Course, student, message, and engagement details shown below are illustrative."],
-      Research: ["PROTOTYPE RESEARCH WORKSPACE", "Research workflow is not connected to a verified live project feed yet."],
-      Service: ["MIXED SOURCES", "The Calendar area shows authorized event-title matches for program keywords; affiliation is not verified. Founder, internship, mentor, attendance, and roster areas remain sample/prototype."],
-      People: ["MIXED PROTOTYPE · VERIFY BEFORE USE", "No directory, contacts, or student system is connected. Entries marked source-needed are not verified."]
+      Today: {
+        eyebrow: "WORK ITEMS",
+        disconnected: "SOURCE NOT CONNECTED",
+        title: "Today needs a verified work-item source",
+        detail: "Ranked tasks, urgency counts, progress, and category-balance metrics are unavailable. The previous static examples have been removed from the operational view.",
+        requirement: "Connect an approved current-work tracker before this page can prioritize, route, complete, or dismiss work."
+      },
+      Teaching: {
+        eyebrow: "TEACHING",
+        disconnected: "COURSE SOURCE NOT CONNECTED",
+        title: "Teaching data is unavailable",
+        detail: "Courses, class plans, students, engagement, messages, assignments, and LCOS status are not shown without a verified source.",
+        requirement: "Canvas and student systems are intentionally not connected. An approved non-student course source is required for this workspace."
+      },
+      Research: {
+        eyebrow: "RESEARCH",
+        disconnected: "PROJECT SOURCE NOT CONNECTED",
+        title: "Research data is unavailable",
+        detail: "Projects, stages, deadlines, manuscript status, coauthor updates, and workload estimates are not shown without a verified source.",
+        requirement: "Connect an approved research-project source before this workspace can report status or offer project actions."
+      },
+      Service: {
+        eyebrow: "SERVICE",
+        disconnected: "PROGRAM SOURCE NOT CONNECTED",
+        title: "Service data is unavailable",
+        detail: "Founder, mentor, internship, attendance, roster, and program-schedule data are not shown. The synthetic Incubator fixture is disabled.",
+        requirement: "Connect an approved program source. Calendar event-title keywords are not evidence of program affiliation and are not used here."
+      },
+      People: {
+        eyebrow: "PEOPLE",
+        disconnected: "DIRECTORY SOURCE NOT CONNECTED",
+        title: "People data is unavailable",
+        detail: "Names, titles, relationships, project ownership, handoffs, and student-worker details are not shown without a verified source.",
+        requirement: "Connect an approved directory or relationship source before this workspace can identify people or assign actions."
+      }
     }[page];
   }
-  function showNativeStatus(page) {
+  function openSection(page) {
+    var target = Array.prototype.find.call(document.querySelectorAll(".sectionTabs button"), function (button) {
+      return tabPage(button) === page;
+    });
+    if (!target) return;
+    target.click();
+    target.focus();
+    scheduleActivePage(60);
+  }
+  function sectionActionKey(feedId, itemId) { return feedId + "|" + itemId; }
+  function sectionLocalRecord(feedId, itemId, sectionId) {
+    var record = sectionActionState[sectionActionKey(feedId, itemId)];
+    return record && record.section === sectionId ? record : undefined;
+  }
+  function saveSectionLocalAction(payload, item, actionType, target, returnFocus) {
+    var key = sectionActionKey(payload.feedId, item.id);
+    var previous = sectionActionState[key];
+    sectionActionState[key] = {
+      feedId: payload.feedId, itemId: item.id, section: item.section,
+      actionType: actionType, target: target || "", updatedAt: new Date().toISOString()
+    };
+    if (!writeSectionActionState()) {
+      if (previous) sectionActionState[key] = previous; else delete sectionActionState[key];
+      openDrawer("Action not saved", '<div class="ut-empty" role="alert"><h3>Browser storage is unavailable</h3><p>The source item was not changed. Try again after enabling local browser storage.</p></div>', "PRIVATE BROWSER STATE", returnFocus);
+      return;
+    }
+    updateActionCount();
+    var label = actionType === "complete_local" ? "Completed locally" : actionType === "dismiss_local" ? "Dismissed locally" : "Route staged locally for " + target + " · nobody notified";
+    document.querySelectorAll('[data-section-feed-id="' + CSS.escape(payload.feedId) + '"][data-section-item-id="' + CSS.escape(item.id) + '"] .ut-item-local-state').forEach(function (node) { node.textContent = label; node.hidden = false; });
+    var toast = document.createElement("div");
+    toast.className = "toast ut-toast";
+    toast.setAttribute("role", "status"); toast.setAttribute("aria-live", "polite"); toast.setAttribute("aria-atomic", "true");
+    toast.textContent = "✓ " + label;
+    document.body.appendChild(toast); setTimeout(function () { toast.remove(); }, 2400);
+    if (returnFocus && returnFocus.isConnected) returnFocus.focus();
+  }
+  function openLocalRoute(payload, item, returnFocus) {
+    var drawer = openDrawer("Stage route locally", '<div class="ut-brief"><strong>Nobody will be notified</strong><p>This stores only an opaque item ID and route choice in this browser.</p></div><div class="ut-route-choices"></div>', "PRIVATE BROWSER STATE", returnFocus);
+    ["BOS", "UTampa", "Entrepreneurship Professor"].forEach(function (target) {
+      var button = document.createElement("button");
+      button.className = "ut-primary"; button.type = "button"; button.textContent = target;
+      button.addEventListener("click", function () { closeDrawer(false); saveSectionLocalAction(payload, item, "stage_route_local", target, returnFocus); });
+      drawer.querySelector(".ut-route-choices").appendChild(button);
+    });
+  }
+  function itemDetailsMarkup(item, prepare) {
+    var heading = prepare ? "Local preparation view" : "Verified item details";
+    var summary = item.summary ? '<p>' + escapeHtml(item.summary) + '</p>' : '<p>No additional summary was supplied.</p>';
+    var timing = [item.startAt && "Starts " + formatDate(item.startAt, true), item.endAt && "Ends " + formatDate(item.endAt, true), item.dueAt && "Due " + formatDate(item.dueAt, true)].filter(Boolean).join(" · ");
+    return '<div class="ut-brief"><strong>' + heading + '</strong>' + summary + (timing ? '<p>' + escapeHtml(timing) + '</p>' : '') + '<p>Source status: ' + escapeHtml(item.status) + ' · ' + escapeHtml(item.freshness) + '</p></div>';
+  }
+  function wireSectionAction(control, action, payload, item) {
+    if (action.type === "open_source") return;
+    control.addEventListener("click", function () {
+      if (action.type === "open_details") openDrawer(item.title, itemDetailsMarkup(item, false), "VERIFIED READ-ONLY ITEM", control);
+      else if (action.type === "open_section") openSection(SECTION_TO_PAGE[action.targetSection]);
+      else if (action.type === "prepare") openDrawer("Prepare locally · " + item.title, itemDetailsMarkup(item, true), "LOCAL PREPARATION", control);
+      else if (action.type === "complete_local" || action.type === "dismiss_local") saveSectionLocalAction(payload, item, action.type, "", control);
+      else if (action.type === "stage_route_local") openLocalRoute(payload, item, control);
+    });
+  }
+  function renderSectionItem(payload, item) {
+    var article = document.createElement("article");
+    article.className = "ut-section-item";
+    article.dataset.sectionFeedId = payload.feedId;
+    article.dataset.sectionItemId = item.id;
+    article.dataset.sectionId = item.section;
+    var heading = document.createElement("h3"); heading.textContent = item.title; article.appendChild(heading);
+    var meta = document.createElement("p"); meta.className = "ut-item-meta";
+    var metaParts = [item.category, item.status, item.priority === null ? "Priority unknown" : "Priority " + item.priority, item.needsOwner ? "Needs owner" : "Owner action not required"];
+    meta.textContent = metaParts.join(" · "); article.appendChild(meta);
+    if (item.summary) { var summary = document.createElement("p"); summary.textContent = item.summary; article.appendChild(summary); }
+    var times = [item.startAt && "Starts " + formatDate(item.startAt, true), item.endAt && "Ends " + formatDate(item.endAt, true), item.dueAt && "Due " + formatDate(item.dueAt, true), item.asOf && "As of " + formatDate(item.asOf, true)].filter(Boolean);
+    if (times.length) { var time = document.createElement("p"); time.className = "ut-item-time"; time.textContent = times.join(" · "); article.appendChild(time); }
+    var freshness = document.createElement("p"); freshness.className = "ut-item-freshness"; freshness.textContent = item.freshness === "stale" ? "Stale source data" : item.freshness === "current" ? "Current source data" : "Source freshness unknown"; article.appendChild(freshness);
+    var local = document.createElement("p"); local.className = "ut-item-local-state";
+    var saved = sectionLocalRecord(payload.feedId, item.id, item.section);
+    local.hidden = !saved;
+    if (saved) local.textContent = saved.actionType === "complete_local" ? "Completed locally" : saved.actionType === "dismiss_local" ? "Dismissed locally" : "Route staged locally for " + saved.target + " · nobody notified";
+    article.appendChild(local);
+    if (Array.isArray(item.tags) && item.tags.length) { var tags = document.createElement("p"); tags.className = "ut-item-tags"; tags.textContent = item.tags.join(" · "); article.appendChild(tags); }
+    if (Array.isArray(item.actions) && item.actions.length) {
+      var actions = document.createElement("div"); actions.className = "ut-inline-actions";
+      item.actions.forEach(function (action) {
+        var control;
+        if (action.type === "open_source") {
+          control = document.createElement("a"); control.href = action.href; control.target = "_blank"; control.rel = "noopener noreferrer";
+        } else { control = document.createElement("button"); control.type = "button"; }
+        control.className = "ut-section-action"; control.dataset.sectionAction = action.type;
+        control.textContent = action.label; control.setAttribute("aria-label", action.label + " · " + item.title);
+        wireSectionAction(control, action, payload, item); actions.appendChild(control);
+      });
+      article.appendChild(actions);
+    }
+    return article;
+  }
+  function setTrustedSectionCount(page, section) {
+    var tab = Array.prototype.find.call(document.querySelectorAll(".sectionTabs button"), function (button) { return tabPage(button) === page; });
+    if (!tab) return;
+    var count = tab.querySelector(".ut-section-count");
+    var status = section && section.completeness && section.completeness.status;
+    if (status !== "complete" && status !== "partial") { if (count) count.remove(); delete tab.dataset.utTrustedCount; delete tab.dataset.utTrustedStatus; tab.setAttribute("aria-label", page); return; }
+    if (!count) { count = document.createElement("span"); count.className = "ut-section-count"; tab.appendChild(count); }
+    if (count.textContent !== String(section.completeness.receivedCount)) count.textContent = String(section.completeness.receivedCount);
+    tab.dataset.utTrustedCount = String(section.completeness.receivedCount); tab.dataset.utTrustedStatus = status;
+    tab.setAttribute("aria-label", page + " · " + section.completeness.receivedCount + (status === "partial" ? " items from a partial source" : " verified items"));
+  }
+  function renderUnavailablePage(shell, page, status, reason, retry) {
+    var definition = sectionDefinition(page);
+    if (!definition) return;
+    var view = document.createElement("section");
+    view.className = "ut-live-view ut-unavailable-view";
+    view.dataset.page = page;
+    var headingId = "ut-section-title-" + PAGE_TO_SECTION[page];
+    view.setAttribute("aria-labelledby", headingId);
+    view.innerHTML = '<div class="ut-unavailable-card"><p class="eyebrow"></p><h2></h2><p class="ut-unavailable-detail"></p><div class="ut-source-requirement"><strong>Source state</strong><p></p></div><div class="ut-state-actions"></div></div><aside class="ut-connected-tools"><p class="eyebrow">CONNECTED READ-ONLY TOOLS</p><h3>Calendar and Drive metadata remain available separately</h3><p>Google Calendar event metadata and Google Drive filename metadata are live and read-only. They do not populate or verify this workspace.</p><div class="ut-state-actions"><button class="ut-open-calendar">Open Calendar</button><button class="ut-open-search">Search connected metadata</button></div></aside>';
+    view.querySelector(".ut-unavailable-card .eyebrow").textContent = definition.eyebrow;
+    view.querySelector("h2").id = headingId; view.querySelector("h2").textContent = definition.title;
+    view.querySelector(".ut-unavailable-detail").textContent = definition.detail;
+    view.querySelector(".ut-source-requirement p").textContent = reason || definition.requirement;
+    if (reason && definition.requirement && reason !== definition.requirement) {
+      var boundary = document.createElement("p"); boundary.className = "ut-source-boundary"; boundary.textContent = definition.requirement;
+      view.querySelector(".ut-source-requirement").appendChild(boundary);
+    }
+    if (status === "unavailable" || retry) {
+      var retryButton = document.createElement("button"); retryButton.type = "button"; retryButton.className = "ut-section-retry"; retryButton.textContent = "Retry verified source";
+      retryButton.addEventListener("click", function () { showNativeStatus(page, true); }); view.querySelector(".ut-unavailable-card>.ut-state-actions").appendChild(retryButton);
+    }
+    shell.appendChild(view);
+    view.querySelector(".ut-open-calendar").addEventListener("click", function () { openSection("Calendar"); });
+    view.querySelector(".ut-open-search").addEventListener("click", showSearch);
+  }
+  function updateSectionBanner(banner, page, section) {
+    var definition = sectionDefinition(page); var status = section.completeness.status;
+    var strong = status === "complete" ? "VERIFIED SOURCE · COMPLETE" : status === "partial" ? "VERIFIED SOURCE · PARTIAL" : status === "unavailable" ? "SOURCE UNAVAILABLE" : definition.disconnected;
+    if (section.freshness === "stale") strong += " · STALE";
+    var count = status === "complete" || status === "partial" ? section.completeness.receivedCount + " item" + (section.completeness.receivedCount === 1 ? "" : "s") + ". " : "";
+    banner.querySelector("strong").textContent = strong;
+    banner.querySelector("span").textContent = count + (section.completeness.reason || (section.freshness === "stale" ? "The last verified snapshot is stale." : "Read-only source data."));
+  }
+  function renderConnectedSection(shell, page, payload) {
+    var section = payload.section; var definition = sectionDefinition(page);
+    var view = document.createElement("section"); view.className = "ut-live-view ut-section-view"; view.dataset.page = page;
+    var headingId = "ut-section-title-" + section.id; view.setAttribute("aria-labelledby", headingId);
+    var header = document.createElement("header"); header.className = "ut-panel-head";
+    var copy = document.createElement("div"); var eyebrow = document.createElement("p"); eyebrow.className = "eyebrow"; eyebrow.textContent = definition.eyebrow + " · VERIFIED READ-ONLY SOURCE";
+    var heading = document.createElement("h2"); heading.id = headingId; heading.textContent = page;
+    var asOf = document.createElement("p"); asOf.className = "ut-source"; asOf.textContent = "As of " + formatDate(section.asOf || payload.generatedAt, true) + " · " + section.freshness + " · " + section.completeness.status;
+    copy.appendChild(eyebrow); copy.appendChild(heading); copy.appendChild(asOf); header.appendChild(copy); view.appendChild(header);
+    if (section.completeness.status === "partial" || section.freshness === "stale") {
+      var warning = document.createElement("div"); warning.className = "ut-source-warning"; warning.setAttribute("role", "status");
+      var warningTitle = document.createElement("strong"); warningTitle.textContent = section.freshness === "stale" ? "STALE SOURCE DATA" : "PARTIAL SOURCE DATA";
+      var warningText = document.createElement("p"); warningText.textContent = section.completeness.reason || (section.freshness === "stale" ? "The last verified snapshot is stale. Refresh before relying on it as current." : "The approved source returned an incomplete result.");
+      warning.appendChild(warningTitle); warning.appendChild(warningText); view.appendChild(warning);
+    }
+    var list = document.createElement("div"); list.className = "ut-section-item-list";
+    if (!section.items.length) {
+      var empty = document.createElement("div"); empty.className = "ut-empty";
+      var emptyTitle = document.createElement("h3"); emptyTitle.textContent = section.completeness.status === "complete" ? section.freshness === "stale" ? "Verified empty as of a stale snapshot" : section.freshness === "current" ? "Verified empty" : "Verified empty snapshot · freshness unknown" : "No records supplied from the incomplete source";
+      var emptyText = document.createElement("p"); emptyText.textContent = section.completeness.status === "complete" ? section.freshness === "stale" ? "The approved source reported zero items as of this snapshot, but the snapshot is stale. Refresh before treating it as current." : section.freshness === "current" ? "The approved source explicitly reported zero current items." : "The approved source reported zero items as of this snapshot, but its freshness is unknown. Refresh before treating it as current." : "This is not a verified zero. Retry or check the source before relying on it.";
+      empty.appendChild(emptyTitle); empty.appendChild(emptyText); list.appendChild(empty);
+    } else section.items.forEach(function (item) { list.appendChild(renderSectionItem(payload, item)); });
+    view.appendChild(list); shell.appendChild(view);
+  }
+  async function loadSectionPayload(page, force) {
+    var sectionId = PAGE_TO_SECTION[page]; var cached = sectionCache[sectionId]; var currentMonotonic = monotonicNow();
+    var cacheAge = cached && Number.isFinite(cached.loadedMonotonic) ? currentMonotonic - cached.loadedMonotonic : Infinity;
+    var freshnessValid = !cached || cached.freshForMs === null || cacheAge < cached.freshForMs;
+    if (!force && cached && cached.value && cacheAge < 60000 && freshnessValid) return cached.value;
+    if (!force && cached && cached.promise) return cached.promise;
+    var generation = (sectionLoadGeneration[sectionId] || 0) + 1;
+    sectionLoadGeneration[sectionId] = generation;
+    var requestStartedMonotonic = monotonicNow();
+    var promise = requestJson("/api/sections/" + encodeURIComponent(sectionId)).then(function (payload) {
+      if (payload.authRequired) return payload;
+      if (!payload || payload.viewVersion !== "utampa-section-view.v1" || !Number.isFinite(Date.parse(payload.servedAt)) || payload.section && payload.section.id !== sectionId || !payload.section || !payload.section.completeness || !Array.isArray(payload.section.items)) throw new Error("Section response invalid");
+      var loadedMonotonic = monotonicNow();
+      var requestElapsed = Math.max(0, loadedMonotonic - requestStartedMonotonic);
+      downgradeExpiredSectionFreshness(payload, Date.parse(payload.servedAt) + requestElapsed);
+      var freshForMs = sectionFreshForMs(payload);
+      if (freshForMs !== null) freshForMs = Math.max(0, freshForMs - requestElapsed);
+      sectionPayloadTiming.set(payload, { loadedMonotonic: loadedMonotonic, freshForMs: freshForMs });
+      if (sectionLoadGeneration[sectionId] === generation) sectionCache[sectionId] = { value: payload, loadedMonotonic: loadedMonotonic, freshForMs: freshForMs };
+      return payload;
+    }).finally(function () {
+      if (sectionCache[sectionId] && sectionCache[sectionId].promise === promise) delete sectionCache[sectionId];
+    });
+    sectionCache[sectionId] = { promise: promise, value: cached && cached.value, loadedMonotonic: cached && cached.loadedMonotonic, freshForMs: cached && cached.freshForMs };
+    return promise;
+  }
+  function showNativeStatus(page, force) {
+    if (sessionAuthRequired) { renderSessionEnded(); return; }
     restoreNativeView();
     var shell = document.querySelector(".topShell");
-    var status = sourceStatus(page);
-    if (!shell || !status) return;
+    var definition = sectionDefinition(page);
+    if (!shell || !definition) return;
     var banner = shell.querySelector(".ut-source-status");
     if (!banner) {
       banner = document.createElement("section");
@@ -239,52 +581,26 @@
       shell.prepend(banner);
     }
     banner.dataset.page = page;
-    banner.innerHTML = '<div><strong>' + escapeHtml(status[0]) + '</strong><span>' + escapeHtml(status[1]) + '</span></div>' + mobileActionsMarkup();
+    banner.innerHTML = '<div><strong>LOADING VERIFIED SOURCE</strong><span>Checking the approved read-only section feed.</span></div>' + mobileActionsMarkup();
     wireMobileActions(banner);
-    clarifyNativeProvenance(page);
-    if (page === "Service") setTimeout(renderServiceSchedule, 0);
-  }
-  function renderServiceSchedule() {
-    var schedule = document.querySelector(".lecCalendar.hoverCalendar.promoted");
-    if (!schedule || schedule.dataset.liveSchedule) return;
-    var requestId = (schedule._utCalendarRequestId || 0) + 1;
-    schedule._utCalendarRequestId = requestId;
-    schedule.dataset.liveSchedule = "loading";
-    schedule.setAttribute("aria-busy", "true");
-    schedule.innerHTML = '<div class="ut-service-schedule-head"><div><p class="eyebrow">AUTHORIZED CALENDAR TITLE MATCHES · READ-ONLY</p><h2>Possible program events</h2><p>Matched only by event-title keywords; program affiliation is not verified.</p></div><button class="ut-service-refresh">Refresh</button></div><div class="ut-service-schedule-body" role="status" aria-live="polite" aria-atomic="true"><div class="ut-loading">Loading authorized Calendar title matches…</div></div>';
-    schedule.querySelector(".ut-service-refresh").addEventListener("click", function () { schedule.dataset.liveSchedule = ""; renderServiceSchedule(); });
-    loadCalendar().then(function (result) {
-      if (!schedule.isConnected || schedule._utCalendarRequestId !== requestId) return;
-      var body = schedule.querySelector(".ut-service-schedule-body");
-      if (!body) return;
-      var eyebrow = schedule.querySelector(".ut-service-schedule-head .eyebrow");
-      if (result.reauthorize) {
-        if (eyebrow) eyebrow.textContent = "CALENDAR CONNECTION REQUIRED";
-        schedule.dataset.liveSchedule = "reauthorize";
-        return void (body.innerHTML = reconnectMarkup());
+    var loading = document.createElement("section"); loading.className = "ut-live-view ut-section-loading"; loading.dataset.page = page; loading.setAttribute("aria-busy", "true"); loading.innerHTML = '<div class="ut-loading" role="status">Loading verified section data…</div>'; shell.appendChild(loading);
+    var requestId = ++sectionRequestId;
+    loadSectionPayload(page, force).then(function (payload) {
+      if (requestId !== sectionRequestId || currentPage() !== page) return;
+      document.querySelectorAll(".ut-live-view").forEach(function (node) { node.remove(); });
+      if (payload.authRequired) {
+        banner.querySelector("strong").textContent = "SIGN IN REQUIRED"; banner.querySelector("span").textContent = "Your private dashboard session has ended.";
+        var authView = document.createElement("section"); authView.className = "ut-live-view ut-unavailable-view"; authView.dataset.page = page; authView.innerHTML = signInMarkup(); shell.appendChild(authView); setTrustedSectionCount(page, null); return;
       }
-      if (eyebrow) eyebrow.textContent = calendarIncomplete(result) ? "CALENDAR TITLE MATCHES · INCOMPLETE SOURCE" : "AUTHORIZED CALENDAR TITLE MATCHES · READ-ONLY";
-      var nowMs = Date.now();
-      var matches = result.events.filter(function (event) {
-        var end = new Date(event.end || event.start).getTime();
-        return /(?:spartan\s+incubator|\bincubator\b|\blowth\b|\blec\b)/i.test(event.title || "") && Number.isFinite(end) && end >= nowMs;
-      });
-      var quality = calendarQualityMarkup(result);
-      if (!matches.length && calendarIncomplete(result)) body.innerHTML = quality + '<div class="ut-empty"><h3>No complete program schedule available</h3><p>No matching events were returned from the calendars that loaded. Retry before relying on this as an empty schedule.</p></div><p class="ut-source">Source: ' + escapeHtml(result.source) + '</p>';
-      else if (!matches.length) body.innerHTML = '<div class="ut-empty"><h3>No matching Calendar titles found</h3><p>No upcoming event titles containing Spartan Incubator, Incubator, Lowth, or LEC were found in the authorized Calendar window.</p></div><p class="ut-source">Source: ' + escapeHtml(result.source) + '</p>';
-      else body.innerHTML = quality + '<div class="ut-service-events">' + matches.map(serviceEventMarkup).join("") + '</div><p class="ut-source">Source: ' + escapeHtml(result.source) + '</p>';
-      schedule.dataset.liveSchedule = "ready";
+      updateSectionBanner(banner, page, payload.section); setTrustedSectionCount(page, payload.section);
+      if (payload.section.completeness.status === "complete" || payload.section.completeness.status === "partial") renderConnectedSection(shell, page, payload);
+      else renderUnavailablePage(shell, page, payload.section.completeness.status, payload.section.completeness.reason, payload.section.completeness.status === "unavailable");
+      scheduleSectionFreshness(page, payload);
     }).catch(function () {
-      if (!schedule.isConnected || schedule._utCalendarRequestId !== requestId) return;
-      var body = schedule.querySelector(".ut-service-schedule-body");
-      var eyebrow = schedule.querySelector(".ut-service-schedule-head .eyebrow");
-      if (eyebrow) eyebrow.textContent = "CALENDAR SCHEDULE UNAVAILABLE";
-      if (body) body.innerHTML = '<div class="ut-empty" role="alert" aria-live="assertive" aria-atomic="true"><h3>Program schedule unavailable</h3><p>Google Calendar could not be read. Static or sample program events are not shown as a fallback.</p><button class="ut-retry">Try again</button></div>';
-      var retry = schedule.querySelector(".ut-retry");
-      if (retry) retry.addEventListener("click", function () { schedule.dataset.liveSchedule = ""; renderServiceSchedule(); });
-      schedule.dataset.liveSchedule = "error";
-    }).finally(function () {
-      if (schedule.isConnected && schedule._utCalendarRequestId === requestId) schedule.removeAttribute("aria-busy");
+      if (requestId !== sectionRequestId || currentPage() !== page) return;
+      document.querySelectorAll(".ut-live-view").forEach(function (node) { node.remove(); });
+      banner.querySelector("strong").textContent = "SECTION SOURCE UNAVAILABLE"; banner.querySelector("span").textContent = "The verified section feed could not be loaded.";
+      setTrustedSectionCount(page, null); renderUnavailablePage(shell, page, "unavailable", "The verified section feed could not be loaded. Nothing was inferred from Calendar, Drive, or sample data.", true);
     });
   }
   function syncActivePage() {
@@ -292,12 +608,10 @@
     if (!active) return;
     var page = tabPage(active);
     if (page === "Calendar") {
-      var nativeCalendar = document.querySelector(".topShell .calendarHeader,.topShell .gcal");
-      if (nativeCalendar && !document.querySelector(".ut-calendar-panel")) showCalendarPanel();
+      if (!document.querySelector(".ut-calendar-panel")) showCalendarPanel();
     } else {
       var status = document.querySelector('.ut-source-status[data-page="' + page + '"]');
       if (!status) showNativeStatus(page);
-      else if (page === "Service") renderServiceSchedule();
     }
   }
   async function prepareEvent(title) {
@@ -305,7 +619,8 @@
     try {
       var result = await requestJson("/api/drive?q=" + encodeURIComponent(title.split(/[·:\-]/)[0].trim()));
       var body = drawer.querySelector(".ut-live-body");
-      if (result.reauthorize) body.innerHTML = reconnectMarkup();
+      if (result.authRequired) body.innerHTML = signInMarkup();
+      else if (result.reauthorize) body.innerHTML = reconnectMarkup();
       else {
         if (!Array.isArray(result.files)) throw new Error("Drive response invalid");
         var files = result.files;
@@ -318,12 +633,14 @@
     try {
       var calendar = await loadCalendar();
       var body = drawer.querySelector(".ut-live-body");
+      if (calendar.authRequired) return void (body.innerHTML = signInMarkup());
       if (calendar.reauthorize) return void (body.innerHTML = reconnectMarkup());
       var next = calendar.events.find(function (event) { return new Date(event.end || event.start).getTime() >= Date.now(); });
       if (!next && calendarIncomplete(calendar)) return void (body.innerHTML = calendarQualityMarkup(calendar) + '<div class="ut-empty"><h3>No complete preparation result</h3><p>No upcoming event was returned from the calendars that loaded. Retry before treating this as an empty schedule.</p></div>');
       if (!next) return void (body.innerHTML = '<div class="ut-empty"><h3>No upcoming event</h3><p>There is no upcoming event in the authorized Calendar window.</p></div>');
       body.innerHTML = calendarQualityMarkup(calendar) + eventMarkup(next) + '<div class="ut-loading" role="status">Finding related Drive filename matches…</div>';
       var drive = await requestJson("/api/drive?q=" + encodeURIComponent(next.title.split(/[·:\-]/)[0].trim()));
+      if (drive.authRequired) return void (body.innerHTML += signInMarkup());
       if (drive.reauthorize) return void (body.innerHTML += reconnectMarkup());
       if (!Array.isArray(drive.files)) throw new Error("Drive response invalid");
       var files = drive.files;
@@ -349,6 +666,7 @@
       try {
         var results = await Promise.all([loadCalendar(), requestJson("/api/drive?q=" + encodeURIComponent(query))]);
         if (!drawer.isConnected || currentRequestId !== requestId) return;
+        if (results.some(function (item) { return item.authRequired; })) return void (output.innerHTML = signInMarkup());
         if (results.some(function (item) { return item.reauthorize; })) return void (output.innerHTML = reconnectMarkup());
         var events = results[0].events.filter(function (item) { return item.title.toLowerCase().includes(query.toLowerCase()); });
         if (!Array.isArray(results[1].files)) throw new Error("Drive response invalid");
@@ -362,40 +680,37 @@
     });
     drawer.querySelector("input").focus();
   }
-  function applyTaskState() {
-    document.querySelectorAll(".todayTask").forEach(function (button) {
-      var title = (button.querySelector("h3") || {}).textContent || "";
-      var record = state[title];
-      button.hidden = Boolean(record && (record.status === "completed" || record.status === "dismissed" || record.status === "routed" || record.status === "route-staged"));
-    });
-    updateActionCount();
-  }
   function updateActionCount() {
-    var count = Object.keys(state).length;
+    var count = Object.keys(sectionActionState).length;
     var countText = count ? " (" + count + ")" : "";
     document.querySelectorAll(".ut-actions-count").forEach(function (node) { if (node.textContent !== countText) node.textContent = countText; });
     document.querySelectorAll(".ut-mobile-actions-center").forEach(function (button) { var label = "Actions" + countText; if (button.textContent !== label) button.textContent = label; });
   }
-  function actionRecordMarkup(title, record) {
-    var status = String(record.status || "saved");
-    var labels = { "route-staged": "Route staged locally", routed: "Route staged locally", previewed: "Prototype boundary reviewed", completed: "Completed", dismissed: "Dismissed", staged: "Prototype boundary reviewed" };
-    var detail = (labels[status] || status.charAt(0).toUpperCase() + status.slice(1)) + (record.target ? " · " + record.target : "");
-    return '<article class="ut-action-record" data-action-title="' + escapeHtml(title) + '"><div><h3>' + escapeHtml(title) + '</h3><p>' + escapeHtml(detail) + '</p><time>' + escapeHtml(formatDate(record.updatedAt, true)) + '</time></div><button class="ut-restore-action">Restore</button></article>';
+  function currentSectionItemTitle(record) {
+    var cached = sectionCache[record.section]; var items = cached && cached.value && cached.value.section && cached.value.section.items;
+    if (!cached || !cached.value || cached.value.feedId !== record.feedId) return (SECTION_TO_PAGE[record.section] || "Section") + " work item";
+    var item = Array.isArray(items) && items.find(function (candidate) { return candidate.id === record.itemId; });
+    return item ? item.title : (SECTION_TO_PAGE[record.section] || "Section") + " work item";
+  }
+  function actionRecordMarkup(key, record) {
+    var labels = { complete_local: "Completed locally", dismiss_local: "Dismissed locally", stage_route_local: "Route staged locally" };
+    var detail = labels[record.actionType] + (record.target ? " · " + record.target + " · nobody notified" : "");
+    return '<article class="ut-action-record" data-section-action-key="' + escapeHtml(key) + '"><div><h3>' + escapeHtml(currentSectionItemTitle(record)) + '</h3><p>' + escapeHtml(detail) + '</p><time>' + escapeHtml(formatDate(record.updatedAt, true)) + '</time></div><button class="ut-restore-action">Restore</button></article>';
   }
   function showActionCenter() {
-    var entries = Object.keys(state).map(function (title) { return { title: title, record: state[title] }; }).sort(function (left, right) { return String(right.record.updatedAt).localeCompare(String(left.record.updatedAt)); });
+    var entries = Object.keys(sectionActionState).map(function (key) { return { key: key, record: sectionActionState[key] }; }).sort(function (left, right) { return String(right.record.updatedAt).localeCompare(String(left.record.updatedAt)); });
     var body = entries.length
-      ? '<p class="ut-source">Private browser state only. A staged route does not notify another person or system. Prototype form entries are never retained here.</p><div class="ut-action-history">' + entries.map(function (item) { return actionRecordMarkup(item.title, item.record); }).join("") + '</div>'
-      : '<div class="ut-empty"><h3>No saved actions</h3><p>Completed, dismissed, locally staged routes, and reviewed prototype boundaries will appear here.</p></div>';
+      ? '<p class="ut-source">Private browser state only. A staged route does not notify another person or system. Source records are never changed.</p><div class="ut-action-history">' + entries.map(function (item) { return actionRecordMarkup(item.key, item.record); }).join("") + '</div>'
+      : '<div class="ut-empty"><h3>No saved actions</h3><p>Completed, dismissed, and locally staged section actions will appear here.</p></div>';
     var drawer = openDrawer("Actions", body, "PRIVATE BROWSER STATE");
     drawer.querySelectorAll(".ut-restore-action").forEach(function (button) {
       button.addEventListener("click", function () {
         var record = button.closest(".ut-action-record");
-        var key = record.dataset.actionTitle;
-        var previous = state[key];
-        delete state[key];
-        if (!writeState()) {
-          state[key] = previous;
+        var key = record.dataset.sectionActionKey;
+        var previous = sectionActionState[key];
+        delete sectionActionState[key];
+        if (!writeSectionActionState()) {
+          sectionActionState[key] = previous;
           button.textContent = "Try restore again";
           var error = record.querySelector(".ut-action-error");
           if (!error) { error = document.createElement("p"); error.className = "ut-action-error"; error.setAttribute("role", "alert"); record.querySelector("div").appendChild(error); }
@@ -403,86 +718,24 @@
           button.focus();
           return;
         }
-        applyTaskState(); record.remove();
+        updateActionCount();
+        document.querySelectorAll('[data-section-feed-id="' + CSS.escape(previous.feedId) + '"][data-section-item-id="' + CSS.escape(previous.itemId) + '"][data-section-id="' + CSS.escape(previous.section) + '"] .ut-item-local-state').forEach(function (node) { node.hidden = true; node.textContent = ""; });
+        record.remove();
         var next = drawer.querySelector(".ut-restore-action");
         if (next) next.focus();
         else {
-          drawer.querySelector(".ut-live-body").innerHTML = '<div class="ut-empty"><h3>No saved actions</h3><p>Completed, dismissed, locally staged routes, and reviewed prototype boundaries will appear here.</p></div>';
+          drawer.querySelector(".ut-live-body").innerHTML = '<div class="ut-empty"><h3>No saved actions</h3><p>Completed, dismissed, and locally staged section actions will appear here.</p></div>';
           drawer.querySelector(".drawerClose").focus();
         }
       });
     });
-  }
-  function saveAction(title, status, target) {
-    var previous = state[title];
-    state[title] = { status: status, target: target || "", updatedAt: new Date().toISOString() };
-    if (!writeState()) {
-      if (previous) state[title] = previous; else delete state[title];
-      openDrawer("Action not saved", '<div class="ut-empty" role="alert"><h3>Browser storage is unavailable</h3><p>The item was not changed. Try again after enabling local browser storage.</p></div>', "PRIVATE BROWSER STATE");
-      return;
-    }
-    applyTaskState();
-    var shade = document.querySelector(".drawerShade:not(.ut-live-shade)");
-    var focusTarget = document.querySelector(".ut-mobile-actions-center,.ut-actions-button,.sectionTabs button.active");
-    if (shade) closeNativeDialog(shade, function () { if (focusTarget && focusTarget.isConnected) focusTarget.focus(); });
-    var toast = document.createElement("div"); toast.className = "toast ut-toast";
-    toast.setAttribute("role", "status"); toast.setAttribute("aria-live", "polite"); toast.setAttribute("aria-atomic", "true");
-    toast.textContent = status === "route-staged" || status === "routed" ? "✓ Route staged locally for " + target + " · nobody notified" : status === "completed" ? "✓ Completed" : status === "previewed" || status === "staged" ? "✓ Prototype boundary reviewed" : "✓ Dismissed";
-    document.body.appendChild(toast); setTimeout(function () { toast.remove(); }, 2400);
-  }
-  function stageExternalAction(button) {
-    var label = button.textContent.trim();
-    var container = button.closest(".drawer,.founderPortal");
-    var inlineReply = button.closest(".reply,.phoneChat footer");
-    if (!container && inlineReply) {
-      var inlineKey = "Prototype boundary · inline reply · " + label;
-      state[inlineKey] = { status: "previewed", target: label, updatedAt: new Date().toISOString() };
-      var inlineMarkerSaved = writeState();
-      if (!inlineMarkerSaved) delete state[inlineKey];
-      updateActionCount();
-      openDrawer("Send preview is not connected", '<div class="ut-brief"><strong>No message was sent or saved to a connected system</strong><p>Your draft remains only in this prototype page until you navigate away or refresh. SMS, email, and messaging systems are not connected.</p><p>' + (inlineMarkerSaved ? 'A private marker that you reviewed this boundary was saved in this browser.' : 'The private reviewed-boundary marker could not be saved because browser storage is unavailable.') + '</p></div>', "PROTOTYPE ACTION BOUNDARY", button);
-      return true;
-    }
-    if (!container) return false;
-    var heading = container.querySelector("h2");
-    var title = heading ? heading.textContent.trim() : label;
-    var key = "Prototype boundary · " + title + " · " + label;
-    state[key] = { status: "previewed", target: label, updatedAt: new Date().toISOString() };
-    var markerSaved = writeState();
-    if (!markerSaved) delete state[key];
-    updateActionCount();
-    var shade = container.closest(".drawerShade,.portalShade");
-    var returnFocus = shade && shade._utReturnFocus;
-    closeNativeDialog(shade, function () {
-      openDrawer("Prototype preview closed", '<div class="ut-brief"><strong>No connected-system action occurred</strong><p>No message, submission, draft, item, or evidence was sent, saved, opened, or started in a connected system. Values entered in this prototype were discarded when the preview closed. Email, Canvas, student systems, founder systems, and item-specific evidence are not connected.</p><p>' + (markerSaved ? 'A private marker that you reviewed this boundary was saved in this browser.' : 'The private reviewed-boundary marker could not be saved because browser storage is unavailable.') + '</p></div>', "PROTOTYPE ACTION BOUNDARY", returnFocus);
-    });
-    return true;
-  }
-  function enhanceTaskDrawer(drawer) {
-    if (drawer.classList.contains("ut-live-drawer") || drawer.querySelector(".ut-action-controls")) return;
-    if (currentPage() !== "Today") return;
-    var heading = drawer.querySelector("h2"); if (!heading) return;
-    var title = heading.textContent.split(" · ").pop().trim();
-    var controls = document.createElement("div"); controls.className = "ut-action-controls";
-    controls.innerHTML = '<strong>Manage this prototype item</strong><div><button class="ut-complete">Complete</button><label>Local route note <select aria-describedby="ut-route-disclosure ut-route-error"><option value="">Choose…</option><option>BOS</option><option>UTampa</option><option>Entrepreneurship Professor</option></select></label><button class="ut-route">Stage route locally</button><button class="ut-dismiss">Dismiss</button></div><p class="ut-route-error" id="ut-route-error" role="alert" hidden>Choose a local route note before staging.</p><small id="ut-route-disclosure">Saved privately in this browser. A staged route notifies nobody.</small>';
-    controls.querySelector(".ut-complete").addEventListener("click", function () { saveAction(title, "completed"); });
-    controls.querySelector(".ut-dismiss").addEventListener("click", function () { saveAction(title, "dismissed"); });
-    var routeSelect = controls.querySelector("select");
-    var routeError = controls.querySelector(".ut-route-error");
-    routeSelect.addEventListener("change", function () { routeSelect.removeAttribute("aria-invalid"); routeError.hidden = true; });
-    controls.querySelector(".ut-route").addEventListener("click", function () {
-      var target = routeSelect.value;
-      if (!target) { routeSelect.setAttribute("aria-invalid", "true"); routeError.hidden = false; routeSelect.focus(); return; }
-      saveAction(title, "route-staged", target);
-    });
-    drawer.appendChild(controls);
   }
   function currentPage() {
     var active = document.querySelector(".sectionTabs button.active");
     return active ? tabPage(active) : "";
   }
   function clarifyNativeProvenance(page) {
-    document.querySelectorAll('.topShell a[href*="docs.google.com"],.topShell a[href*="drive.google.com"]').forEach(function (link) {
+    document.querySelectorAll('.topShell a[href*="docs.google.com"]:not(.ut-section-action),.topShell a[href*="drive.google.com"]:not(.ut-section-action)').forEach(function (link) {
       link.removeAttribute("href"); link.removeAttribute("target"); link.setAttribute("aria-disabled", "true");
       link.textContent = "Source not connected";
     });
@@ -526,7 +779,12 @@
     if (nav) nav.setAttribute("aria-label", "UTampa workspaces");
     document.querySelectorAll(".sectionTabs button").forEach(function (button) {
       var label = tabPage(button);
-      button.setAttribute("aria-label", label);
+      var fixedBadge = button.querySelector("em");
+      if (fixedBadge) { fixedBadge.hidden = true; fixedBadge.setAttribute("aria-hidden", "true"); }
+      var sectionId = PAGE_TO_SECTION[label]; var cached = sectionId && sectionCache[sectionId];
+      if (cached && cached.value) setTrustedSectionCount(label, cached.value.section);
+      if (button.dataset.utTrustedCount !== undefined) button.setAttribute("aria-label", label + " · " + button.dataset.utTrustedCount + (button.dataset.utTrustedStatus === "partial" ? " items from a partial source" : " verified items"));
+      else button.setAttribute("aria-label", label);
       if (button.classList.contains("active")) button.setAttribute("aria-current", "page");
       else button.removeAttribute("aria-current");
     });
@@ -577,7 +835,11 @@
   function showAccount() {
     var drawer = loadingDrawer("Account and data boundary");
     requestJson("/api/me").then(function (me) {
+      if (me.authRequired) return void (drawer.querySelector(".ut-live-body").innerHTML = signInMarkup());
       drawer.querySelector(".ut-live-body").innerHTML = '<div class="ut-brief"><strong>Authorized account</strong><p>' + escapeHtml(me.email) + '</p></div><div class="ut-brief"><strong>Data boundary</strong><p>Google Calendar events visible to this account and Google Drive metadata are read-only. University accounts, Canvas, Workday, student records, and institutional systems are not connected.</p></div><form method="post" action="/logout"><button class="ut-primary">Sign out</button></form>';
+      drawer.querySelector("form").addEventListener("submit", function () {
+        try { localStorage.removeItem(SECTION_ACTION_STORAGE_KEY); localStorage.removeItem(STORAGE_KEY); } catch (_) {}
+      });
     }).catch(function () { drawer.querySelector(".ut-live-body").innerHTML = '<div class="ut-empty"><p>Account details are temporarily unavailable.</p></div>'; });
   }
   function renderHeaderCountdown() {
@@ -598,6 +860,11 @@
       updateCountdownText(countdown, "—", "CALENDAR CONNECTION", "Reconnect Google to load events");
       return;
     }
+    if (headerCalendarResult.authRequired) {
+      updateCountdownAttributes(countdown, "sign-in", "Dashboard session ended. Sign in again to load Calendar events.");
+      updateCountdownText(countdown, "—", "SIGN IN REQUIRED", "Open My Work Login");
+      return;
+    }
     var nowMs = Date.now();
     var next = headerCalendarResult.events.find(function (event) {
       var end = new Date(event.end || event.start).getTime();
@@ -612,7 +879,7 @@
     var minutes = Number.isFinite(startMs) ? Math.max(0, Math.ceil((startMs - nowMs) / 60000)) : null;
     var value = minutes === null ? "—" : minutes < 1 ? "NOW" : minutes < 60 ? minutes + "m" : Math.floor(minutes / 60) + "h";
     updateCountdownAttributes(countdown, calendarIncomplete(headerCalendarResult) ? "partial" : "ready", (calendarIncomplete(headerCalendarResult) ? "Next known Calendar event from incomplete results: " : "Next Calendar event: ") + next.title + ", " + formatEventTime(next));
-    updateCountdownText(countdown, value, calendarIncomplete(headerCalendarResult) ? "NEXT KNOWN · PARTIAL" : "NEXT CALENDAR EVENT", next.title + " · " + formatEventTime(next));
+    updateCountdownText(countdown, value, calendarIncomplete(headerCalendarResult) ? "NEXT KNOWN · PARTIAL" : "NEXT CALENDAR EVENT", formatEventTime(next) + " · " + next.title);
   }
   function updateNodeText(node, value) {
     if (!node) return;
@@ -630,6 +897,7 @@
     updateNodeText(countdown.querySelector("span"), detail);
   }
   function refreshHeaderCountdown() {
+    if (sessionAuthRequired) { renderHeaderCountdown(); return; }
     var requestId = ++headerCalendarRequestId;
     headerCalendarError = false;
     loadCalendar().then(function (result) {
@@ -654,8 +922,16 @@
   function wireHeader() {
     var tools = document.querySelector(".persistentTools"); if (!tools) return;
     ensureLiveCountdown(tools);
+    var record = tools.querySelector(".globalRecord");
+    if (record) { record.hidden = true; record.disabled = true; record.setAttribute("aria-hidden", "true"); }
     var prepare = tools.querySelector(".prepareHeader");
-    if (prepare && !prepare.dataset.liveWired) { prepare.dataset.liveWired = "1"; prepare.addEventListener("click", function (event) { event.preventDefault(); event.stopImmediatePropagation(); showPrepareMe(); }, true); }
+    if (prepare) {
+      if (!prepare.dataset.liveWired) {
+        prepare.addEventListener("click", function (event) { event.preventDefault(); event.stopImmediatePropagation(); showPrepareMe(); }, true);
+        prepare.dataset.liveWired = "1";
+      }
+      prepare.classList.add("ut-live-ready"); prepare.hidden = false; prepare.disabled = false; prepare.removeAttribute("aria-hidden");
+    }
     if (!tools.querySelector(".ut-search-button")) { var search = document.createElement("button"); search.className = "ut-search-button"; search.textContent = "Search"; search.addEventListener("click", showSearch); tools.insertBefore(search, prepare || tools.firstChild); }
     var profile = tools.querySelector(".profile");
     if (profile && !profile.dataset.liveWired) { profile.dataset.liveWired = "1"; profile.addEventListener("click", function (event) { event.preventDefault(); event.stopImmediatePropagation(); showAccount(); }, true); }
@@ -665,30 +941,17 @@
     if (trigger && !trigger.closest(".drawerShade")) lastNativeTrigger = trigger;
   }, true);
   document.addEventListener("click", function (event) {
-    var actionButton = event.target.closest("button");
-    if (actionButton && /^(Send|Send…|Send\.\.\.|Share with founder|Submit update|Save draft|Edit myself|Approve \+ continue|View evidence|Not now)$/i.test(actionButton.textContent.trim()) && stageExternalAction(actionButton)) {
-      event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); return;
-    }
-    if (actionButton && /record revision/i.test(actionButton.textContent.trim()) && actionButton.closest(".drawer,.founderPortal")) {
-      event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation();
-      var nativeShade = actionButton.closest(".drawerShade");
-      var returnFocus = nativeShade && nativeShade._utReturnFocus;
-      closeNativeDialog(nativeShade, function () {
-        openDrawer("Recording is not connected", '<div class="ut-empty"><h3>Prototype control only</h3><p>No audio was captured and no automated revision was created. Typed text in the preview is not retained.</p></div>', "PROTOTYPE ACTION BOUNDARY", returnFocus);
-      });
-    }
-  }, true);
-  document.addEventListener("click", function (event) {
     var prepare = event.target.closest("[data-prepare-event]");
     if (prepare) { event.preventDefault(); prepareEvent(prepare.dataset.prepareEvent); return; }
     var tab = event.target.closest(".sectionTabs button");
     if (tab) {
+      document.querySelectorAll(".sectionTabs button").forEach(function (button) { button.classList.toggle("active", button === tab); });
+      syncSectionAccessibility();
       scheduleActivePage(60);
     }
   });
   function reconcileObservedDom() {
-    wireHeader(); applyTaskState(); syncSectionAccessibility(); clarifyNativeProvenance(currentPage()); enhanceNativeDialogs();
-    document.querySelectorAll(".drawer:not(.ut-live-drawer)").forEach(enhanceTaskDrawer);
+    wireHeader(); syncSectionAccessibility(); suppressNativeShell(document.querySelector(".topShell")); clarifyNativeProvenance(currentPage()); enhanceNativeDialogs();
   }
   var observer = new MutationObserver(function () {
     if (observerWorkTimer !== null) return;
@@ -708,9 +971,12 @@
     activePageTimer = setTimeout(function () { activePageTimer = null; syncActivePage(); }, delay);
   }
   function start() {
-    wireHeader(); applyTaskState(); syncSectionAccessibility(); clarifyNativeProvenance(currentPage());
+    wireHeader(); syncSectionAccessibility(); clarifyNativeProvenance(currentPage());
     observer.observe(document.body, { childList: true, subtree: true });
-    window.addEventListener("storage", function (event) { if (event.key === STORAGE_KEY) { state = readState(); applyTaskState(); } });
+    window.addEventListener("storage", function (event) {
+      if (event.key === STORAGE_KEY && event.newValue !== null) { try { localStorage.removeItem(STORAGE_KEY); } catch (_) {} }
+      if (event.key === SECTION_ACTION_STORAGE_KEY) { sectionActionState = readSectionActionState(); updateActionCount(); }
+    });
     scheduleActivePage(80);
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start); else start();

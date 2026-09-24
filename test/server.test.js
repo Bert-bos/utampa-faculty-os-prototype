@@ -6,13 +6,13 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const vm = require("node:vm");
 const { createApp, createGoogleOAuthProvider } = require("../server");
+const { buildSectionFeedFromRows, createUnavailableFeed } = require("../lib/section-data-contract");
 
 const CLIENT_ID = "synthetic-client-id.apps.googleusercontent.com";
 const CLIENT_SECRET = "synthetic-client-secret";
 const REDIRECT_URI = "https://utampa.example/auth/google/callback";
-const ALLOWED_EMAIL = "bert@bertseither.com";
+const ALLOWED_EMAIL = "owner@example.test";
 const SECRET = "0123456789abcdef0123456789abcdef";
 
 function fakeOAuth(identity = { sub: "google-subject-123", email: ALLOWED_EMAIL }) {
@@ -39,6 +39,7 @@ async function fixture(t, options = {}) {
   fs.writeFileSync(path.join(rootDir, "data", "fixture.json"), JSON.stringify({ synthetic: true }));
   fs.writeFileSync(path.join(rootDir, "data", "spartan-incubator.fixture.json"), JSON.stringify({ __synthetic: true }));
   fs.writeFileSync(path.join(rootDir, "assets", "app.js"), "window.privateDashboard=true;");
+  fs.writeFileSync(path.join(rootDir, "utampa-live.v1.js"), "window.approvedPrivateAsset=true;");
   fs.writeFileSync(path.join(rootDir, "server.js"), "SERVER SOURCE MUST NOT BE SERVED");
   fs.writeFileSync(path.join(rootDir, "package.json"), "{\"private\":true}");
   const oauth = options.oauth || fakeOAuth();
@@ -76,6 +77,14 @@ test("startup fails closed when OAuth or session configuration is absent or weak
   }
   assert.throws(() => createApp({ ...base, clientSecret: "short" }), /GOOGLE_CLIENT_SECRET/);
   assert.throws(() => createApp({ ...base, sessionSecret: "short" }), /UTAMPA_SESSION_SECRET/);
+  assert.throws(
+    () => createApp({ ...base, sectionFeedJson: '{"secret_marker":' }),
+    error => error.code === "UTAMPA_SECTION_FEED_JSON_INVALID" && !error.message.includes("secret_marker")
+  );
+  assert.throws(
+    () => createApp({ ...base, sectionFeedJson: "{}" }),
+    error => error.code === "UTAMPA_SECTION_FEED_INVALID" && Array.isArray(error.errors) && error.errors.length > 0
+  );
 });
 
 test("sign-in surface is neutral, accessible, touch-sized, and contains no local credentials", async t => {
@@ -179,9 +188,13 @@ test("authenticated delivery allowlists approved assets and denies repository, h
   const { origin } = await fixture(t);
   const { sessionCookie } = await signIn(origin);
   const fixtureResponse = await fetch(`${origin}/data/spartan-incubator.fixture.json`, { headers: { Cookie: sessionCookie } });
-  assert.deepEqual(await fixtureResponse.json(), { __synthetic: true });
-  const asset = await fetch(`${origin}/assets/app.js`, { headers: { Cookie: sessionCookie } });
-  assert.match(await asset.text(), /privateDashboard/);
+  assert.equal(fixtureResponse.status, 404);
+  assert.doesNotMatch(await fixtureResponse.text(), /synthetic/i);
+  const approvedAsset = await fetch(`${origin}/utampa-live.v1.js`, { headers: { Cookie: sessionCookie } });
+  assert.match(await approvedAsset.text(), /approvedPrivateAsset/);
+  const retiredAsset = await fetch(`${origin}/assets/app.js`, { headers: { Cookie: sessionCookie } });
+  assert.equal(retiredAsset.status, 404);
+  assert.doesNotMatch(await retiredAsset.text(), /privateDashboard/);
   for (const route of ["/server.js", "/package.json", "/docs/RELEASE-HANDOFF.md", "/.env", "/.git/config", "/data/fixture.json", "/boss/"]) {
     const response = await fetch(`${origin}${route}`, { headers: { Cookie: sessionCookie }, redirect: "manual" });
     assert.equal(response.status, 404, route);
@@ -198,6 +211,8 @@ test("authenticated index delivery removes only exported Cloudflare challenge co
     assert.equal(response.status, 200);
     assert.match(body, /PRIVATE DASHBOARD MARKER →/);
     assert.match(body, /window\.legitimateInline=true/);
+    assert.match(body, /id="utampa-fail-closed-shell"/);
+    assert.match(body, /\.topShell>:not\(\.ut-live-view\):not\(\.ut-calendar-panel\):not\(\.ut-source-status\)\{display:none!important\}/);
     assert.doesNotMatch(body, /__CF\$cv\$params|challenge-platform/);
     assert.equal(Number(response.headers.get("content-length")), Buffer.byteLength(body));
     const head = await fetch(`${origin}${route}`, { method: "HEAD", headers: { Cookie: sessionCookie } });
@@ -295,6 +310,9 @@ test("authorized Calendar and Drive API routes proxy only read-only sanitized da
     ] }), { status: 200, headers: { "content-type": "application/json" } });
     if (String(url).includes("/calendars/primary%40example.com/events")) return new Response(JSON.stringify({ items: [{ id: "event-1", summary: "ENT 330", description: "must not leak", start: { dateTime: "2026-09-22T16:00:00Z" }, end: { dateTime: "2026-09-22T17:00:00Z" }, htmlLink: "https://calendar.google.com/event" }] }), { status: 200, headers: { "content-type": "application/json" } });
     if (String(url).includes("/calendars/outlook-feed%40import.calendar.google.com/events")) return new Response(JSON.stringify({ items: [{ id: "event-2", summary: "Office hours", start: { dateTime: "2026-09-22T18:00:00Z" }, end: { dateTime: "2026-09-22T19:00:00Z" }, htmlLink: "https://calendar.google.com/event-2" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    if (String(url).includes("/calendars/holidays%40example.com/events")) return new Response(JSON.stringify({ items: [] }), { status: 200, headers: { "content-type": "application/json" } });
+    const driveUrl = new URL(String(url));
+    if (driveUrl.searchParams.get("pageToken") === "more-drive-results") return new Response(JSON.stringify({ files: [{ id: "file-2", name: "ENT 330 notes", mimeType: "application/vnd.google-apps.document", modifiedTime: "2026-09-21T12:00:00Z", webViewLink: "https://docs.google.com/document/d/file-2" }] }), { status: 200, headers: { "content-type": "application/json" } });
     return new Response(JSON.stringify({ files: [{ id: "file-1", name: "ENT 330 deck", mimeType: "application/vnd.google-apps.presentation", modifiedTime: "2026-09-22T12:00:00Z", webViewLink: "https://drive.google.com/file" }], nextPageToken: "more-drive-results" }), { status: 200, headers: { "content-type": "application/json" } });
   };
   const { origin } = await fixture(t, { oauth, fetchImpl });
@@ -315,13 +333,19 @@ test("authorized Calendar and Drive API routes proxy only read-only sanitized da
   assert.equal(drive.status, 200);
   const driveBody = await drive.json();
   assert.equal(driveBody.files[0].name, "ENT 330 deck");
-  assert.equal(driveBody.truncated, true);
-  assert.match(driveBody.source, /first page returned 1 filename match; additional pages exist/);
+  assert.equal(driveBody.files[1].name, "ENT 330 notes");
+  assert.equal(driveBody.partial, false);
+  assert.equal(driveBody.truncated, false);
+  assert.match(driveBody.source, /2 filename substring matches from 2 files inspected across 2 pages/);
   assert.ok(requests.every(request => request.options.headers.Authorization === "Bearer access-token"));
   assert.ok(requests.some(request => request.url.includes("/users/me/calendarList")));
   assert.ok(requests.some(request => request.url.includes("outlook-feed%40import.calendar.google.com/events")));
-  assert.ok(!requests.some(request => request.url.includes("holidays%40example.com/events")));
+  assert.ok(requests.some(request => request.url.includes("holidays%40example.com/events")));
   assert.ok(requests.some(request => /trashed/.test(request.url)));
+  assert.ok(requests.some(request => /includeItemsFromAllDrives=true/.test(request.url)));
+  assert.ok(requests.some(request => /supportsAllDrives=true/.test(request.url)));
+  assert.ok(requests.some(request => /corpora=allDrives/.test(request.url)));
+  assert.ok(requests.filter(request => request.url.includes("/drive/v3/files")).every(request => !request.url.includes("name+contains")));
 });
 
 test("Calendar reports partial and truncated source state without leaking source identifiers", async t => {
@@ -351,8 +375,9 @@ test("Calendar reports partial and truncated source state without leaking source
   const body = await response.json();
   assert.equal(body.partial, true);
   assert.equal(body.truncated, true);
-  assert.equal(body.warnings.length, 2);
-  assert.match(body.source, /1 of 3 selected calendars loaded/);
+  assert.equal(body.warnings.length, 3);
+  assert.ok(body.warnings.some(warning => warning.code === "calendar_events_truncated"));
+  assert.match(body.source, /1 of 3 accessible calendars loaded/);
   assert.equal(body.events.length, 1);
   assert.equal(body.events[0].url, "");
   assert.doesNotMatch(JSON.stringify(body), /primary@example|private-upstream-id|outlook-feed@/);
@@ -400,17 +425,23 @@ test("revoked refresh requires reauthorization while upstream 403 remains an una
   }
 });
 
-test("Calendar list pagination is disclosed and invalid upstream collections never become verified empty", async t => {
+test("Calendar list pagination is followed and invalid upstream collections never become verified empty", async t => {
   const oauth = fakeOAuth({
     sub: "google-subject-123", email: ALLOWED_EMAIL, accessToken: "access-token", refreshToken: "refresh-token",
     accessTokenExpiresAt: Date.now() + 3600000, grantedScope: "calendar.readonly drive.metadata.readonly"
   });
-  let calendarMode = "truncated-list";
+  let calendarMode = "paginated-list";
+  const requests = [];
   const fetchImpl = async url => {
     const value = String(url);
+    requests.push(value);
     if (value.includes("/users/me/calendarList")) {
       if (calendarMode === "invalid-list") return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
       if (calendarMode === "invalid-events" || calendarMode === "malformed-event") return new Response(JSON.stringify({ items: [{ id: "primary", summary: "Primary", primary: true }]}), { status: 200, headers: { "content-type": "application/json" } });
+      if (new URL(value).searchParams.get("pageToken") === "more-calendars") return new Response(JSON.stringify({ items: [
+        { id: "subscribed", summary: "Subscribed feed", selected: false, hidden: false, accessRole: "reader" },
+        { id: "hidden", summary: "Hidden feed", selected: false, hidden: true, accessRole: "reader" }
+      ] }), { status: 200, headers: { "content-type": "application/json" } });
       return new Response(JSON.stringify({ items: [{ id: "primary", summary: "Primary", primary: true }], nextPageToken: "more-calendars" }), { status: 200, headers: { "content-type": "application/json" } });
     }
     if (value.includes("/calendars/")) return new Response(calendarMode === "invalid-events" ? "{}" : calendarMode === "malformed-event" ? JSON.stringify({ items: [{ id: "bad-event", summary: "Missing times" }] }) : JSON.stringify({ items: [] }), { status: 200, headers: { "content-type": "application/json" } });
@@ -419,13 +450,15 @@ test("Calendar list pagination is disclosed and invalid upstream collections nev
   const { origin } = await fixture(t, { oauth, fetchImpl });
   const { sessionCookie } = await signIn(origin);
 
-  const truncated = await fetch(`${origin}/api/calendar`, { headers: { Cookie: sessionCookie } });
-  const truncatedBody = await truncated.json();
-  assert.equal(truncated.status, 200);
-  assert.equal(truncatedBody.partial, true);
-  assert.equal(truncatedBody.truncated, true);
-  assert.ok(truncatedBody.warnings.some(warning => warning.code === "calendar_list_truncated"));
-  assert.match(truncatedBody.source, /additional calendars were not inspected and selected calendars may be missing/);
+  const paginated = await fetch(`${origin}/api/calendar`, { headers: { Cookie: sessionCookie } });
+  const paginatedBody = await paginated.json();
+  assert.equal(paginated.status, 200);
+  assert.equal(paginatedBody.partial, false);
+  assert.equal(paginatedBody.truncated, false);
+  assert.match(paginatedBody.source, /2 of 2 accessible calendars loaded/);
+  assert.ok(requests.some(value => value.includes("pageToken=more-calendars")));
+  assert.ok(requests.some(value => value.includes("/calendars/subscribed/events")));
+  assert.ok(!requests.some(value => value.includes("/calendars/hidden/events")));
 
   calendarMode = "invalid-events";
   const invalidEvents = await fetch(`${origin}/api/calendar`, { headers: { Cookie: sessionCookie } });
@@ -453,37 +486,359 @@ test("Calendar list pagination is disclosed and invalid upstream collections nev
   assert.deepEqual(await invalidDrive.json(), { error: "drive_unavailable" });
 });
 
-test("repository data contract stays synthetic and unknown is never coerced to zero", () => {
-  const root = path.resolve(__dirname, "..");
-  const fixtureData = JSON.parse(fs.readFileSync(path.join(root, "data", "spartan-incubator.fixture.json"), "utf8"));
-  assert.equal(fixtureData.__synthetic, true);
-  const adapter = fs.readFileSync(path.join(root, "cc-incubator-adapter.v1.js"), "utf8");
-  assert.match(adapter, /Array\.isArray\(rawSubmissions\)/);
-  assert.match(adapter, /submissionsIsArray \? rawSubmissions\.length : null/);
-  assert.match(adapter, /recruitingIsArray[\s\S]*: "no data"/);
-  assert.doesNotMatch(adapter, /weeklySubmissions\s*\|\|\s*\[\]/);
-  const context = { window: {}, document: { readyState: "loading", addEventListener() {} }, console };
-  vm.runInNewContext(adapter, context);
-  assert.equal(context.window.__ccIncubatorAdapterV1.formatCount(null), "no data");
-  assert.equal(context.window.__ccIncubatorAdapterV1.formatCount(undefined), "no data");
-  assert.equal(context.window.__ccIncubatorAdapterV1.formatCount(0), "0");
+test("Calendar paginates events, includes subscribed feeds, deduplicates cross-feed copies, and bounds fan-out", async t => {
+  const oauth = fakeOAuth({
+    sub: "google-subject-123", email: ALLOWED_EMAIL, accessToken: "access-token", refreshToken: "refresh-token",
+    accessTokenExpiresAt: Date.now() + 3600000, grantedScope: "calendar.readonly"
+  });
+  const calendars = [
+    { id: "primary", summary: "Primary", primary: true, accessRole: "owner" },
+    ...Array.from({ length: 6 }, (_, index) => ({ id: `feed-${index + 1}`, summary: `Feed ${index + 1}`, selected: false, hidden: false, accessRole: "reader" }))
+  ];
+  const requests = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const event = (id, title, start, end, iCalUID) => ({ id, summary: title, start: { dateTime: start }, end: { dateTime: end }, ...(iCalUID ? { iCalUID } : {}) });
+  const fetchImpl = async url => {
+    const target = new URL(String(url));
+    requests.push(target.toString());
+    if (target.pathname.endsWith("/users/me/calendarList")) return new Response(JSON.stringify({ items: calendars }), { status: 200, headers: { "content-type": "application/json" } });
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    inFlight -= 1;
+    const pageToken = target.searchParams.get("pageToken");
+    if (target.pathname.includes("/calendars/primary/events")) {
+      if (pageToken === "primary-page-2") return new Response(JSON.stringify({ items: [event("page-2", "Second page", "2026-09-22T20:00:00Z", "2026-09-22T21:00:00Z")] }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ items: [event("primary-copy", "Shared meeting", "2026-09-22T16:00:00Z", "2026-09-22T17:00:00Z", "shared@example.com")], nextPageToken: "primary-page-2" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (target.pathname.includes("/calendars/feed-1/events")) return new Response(JSON.stringify({ items: [event("feed-copy", "Shared meeting renamed", "2026-09-22T16:00:00Z", "2026-09-22T17:00:00Z", "shared@example.com")] }), { status: 200, headers: { "content-type": "application/json" } });
+    if (target.pathname.includes("/calendars/feed-2/events") || target.pathname.includes("/calendars/feed-3/events")) return new Response(JSON.stringify({ items: [event(`fingerprint-${target.pathname.includes("feed-2") ? "a" : "b"}`, "Same imported event", "2026-09-23T16:00:00Z", "2026-09-23T17:00:00Z")] }), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({ items: [] }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const { origin } = await fixture(t, { oauth, fetchImpl });
+  const { sessionCookie } = await signIn(origin);
+  const response = await fetch(`${origin}/api/calendar`, { headers: { Cookie: sessionCookie } });
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.partial, false);
+  assert.equal(body.truncated, false);
+  assert.equal(body.events.length, 3);
+  assert.deepEqual(body.events.map(item => item.title), ["Shared meeting", "Second page", "Same imported event"]);
+  assert.ok(body.events.every(item => !("dedupeKey" in item) && !("iCalUID" in item)));
+  assert.ok(requests.some(value => value.includes("pageToken=primary-page-2")));
+  assert.ok(requests.some(value => value.includes("/calendars/feed-6/events")));
+  assert.ok(maxInFlight <= 5);
+  assert.equal(maxInFlight, 5);
 });
 
-test("browser bootstrap waits for embedded RSC data and add-ons wait for the first React commit", () => {
+test("Drive reports incomplete all-drive searches and deduplicates files across pages", async t => {
+  const oauth = fakeOAuth({
+    sub: "google-subject-123", email: ALLOWED_EMAIL, accessToken: "access-token", refreshToken: "refresh-token",
+    accessTokenExpiresAt: Date.now() + 3600000, grantedScope: "drive.metadata.readonly"
+  });
+  const fetchImpl = async url => {
+    const target = new URL(String(url));
+    if (target.searchParams.get("pageToken") === "drive-page-2") return new Response(JSON.stringify({ files: [
+      { id: "duplicate", name: "Existing file" },
+      { id: "second", name: "Second page file", webViewLink: "https://docs.google.com/document/d/second" }
+    ], incompleteSearch: true }), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({ files: [{ id: "duplicate", name: "Existing file" }], nextPageToken: "drive-page-2" }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const { origin } = await fixture(t, { oauth, fetchImpl });
+  const { sessionCookie } = await signIn(origin);
+  const response = await fetch(`${origin}/api/drive?q=file`, { headers: { Cookie: sessionCookie } });
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.partial, true);
+  assert.equal(body.truncated, true);
+  assert.deepEqual(body.warnings, [{ code: "drive_incomplete_search" }]);
+  assert.deepEqual(body.files.map(file => file.id), ["duplicate", "second"]);
+  assert.match(body.source, /results may be incomplete/);
+});
+
+test("Google API 401 responses refresh once and retry with the replacement access token", async t => {
+  const oauth = fakeOAuth({
+    sub: "google-subject-123", email: ALLOWED_EMAIL, accessToken: "old-token", refreshToken: "refresh-token",
+    accessTokenExpiresAt: Date.now() + 3600000, grantedScope: "calendar.readonly"
+  });
+  let refreshCount = 0;
+  oauth.refresh = async token => {
+    assert.equal(token, "refresh-token");
+    refreshCount += 1;
+    return { accessToken: "new-token", accessTokenExpiresAt: Date.now() + 3600000, grantedScope: "calendar.readonly" };
+  };
+  const authorizationHeaders = [];
+  const fetchImpl = async (url, options) => {
+    authorizationHeaders.push(options.headers.Authorization);
+    if (options.headers.Authorization === "Bearer old-token") return new Response("{}", { status: 401, headers: { "content-type": "application/json" } });
+    if (String(url).includes("/users/me/calendarList")) return new Response(JSON.stringify({ items: [{ id: "primary", summary: "Primary", primary: true }] }), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({ items: [] }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const { origin } = await fixture(t, { oauth, fetchImpl });
+  const { sessionCookie } = await signIn(origin);
+  const response = await fetch(`${origin}/api/calendar`, { headers: { Cookie: sessionCookie } });
+  assert.equal(response.status, 200);
+  assert.equal(refreshCount, 1);
+  assert.deepEqual(authorizationHeaders.slice(0, 2), ["Bearer old-token", "Bearer new-token"]);
+});
+
+test("API authentication failures and unknown endpoints always return JSON", async t => {
+  const { origin } = await fixture(t);
+  for (const route of ["/api", "/api/calendar", "/api/sections/today", "/api/unknown"]) {
+    const response = await fetch(`${origin}${route}`, { redirect: "manual" });
+    assert.equal(response.status, 401, route);
+    assert.equal(response.headers.get("location"), null, route);
+    assert.match(response.headers.get("content-type"), /^application\/json/, route);
+    assert.deepEqual(await response.json(), { error: "authentication_required" }, route);
+  }
+  const { sessionCookie } = await signIn(origin);
+  for (const route of ["/api", "/api/unknown"]) {
+    const response = await fetch(`${origin}${route}`, { headers: { Cookie: sessionCookie }, redirect: "manual" });
+    assert.equal(response.status, 404, route);
+    assert.match(response.headers.get("content-type"), /^application\/json/, route);
+    assert.deepEqual(await response.json(), { error: "not_found" }, route);
+  }
+});
+
+test("section views are authenticated, fail closed when unconfigured, and enforce route methods", async t => {
+  const current = Date.parse("2026-09-24T12:00:00Z");
+  const { origin } = await fixture(t, { now: () => current });
+  const { sessionCookie } = await signIn(origin);
+  const response = await fetch(`${origin}/api/sections/today`, { headers: { Cookie: sessionCookie } });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const body = await response.json();
+  assert.equal(body.viewVersion, "utampa-section-view.v1");
+  assert.equal(body.servedAt, "2026-09-24T12:00:00.000Z");
+  assert.equal(body.section.id, "today");
+  assert.equal(body.section.completeness.status, "unconfigured");
+  assert.equal(body.section.completeness.receivedCount, null);
+  assert.deepEqual(body.section.items, []);
+  assert.doesNotMatch(JSON.stringify(body), /sources|sourceIds|sourceRef|provenance|entityId/);
+
+  const method = await fetch(`${origin}/api/sections/today`, { method: "POST", headers: { Cookie: sessionCookie } });
+  assert.equal(method.status, 405);
+  assert.equal(method.headers.get("allow"), "GET");
+  const unknown = await fetch(`${origin}/api/sections/calendar`, { headers: { Cookie: sessionCookie } });
+  assert.equal(unknown.status, 404);
+  assert.deepEqual(await unknown.json(), { error: "not_found" });
+});
+
+test("section views project validated live items without exposing provenance and expire freshness at response time", async t => {
+  let current = Date.parse("2026-09-24T12:00:00Z");
+  const generatedAt = "2026-09-24T12:00:00Z";
+  const feed = buildSectionFeedFromRows([{
+    id: "item:today:opaque-001",
+    entityId: "entity:work:opaque-001",
+    section: "today",
+    category: "task",
+    title: "Verified current work",
+    summary: "Sanitized display-safe summary.",
+    status: "open",
+    priority: 1,
+    needsOwner: true,
+    asOf: generatedAt,
+    freshness: "current",
+    staleAfter: "2026-09-24T12:01:00Z",
+    dueAt: null,
+    startAt: null,
+    endAt: null,
+    tags: ["approved"],
+    sourceRef: "record:opaque-001",
+    sourceUrl: "https://docs.google.com/document/opaque-001",
+    actions: [
+      { type: "open_details", label: "Open details" },
+      { type: "open_source", label: "Open source", href: "https://docs.google.com/document/opaque-001" }
+    ]
+  }], {
+    generatedAt,
+    now: current,
+    feedId: "feed:test-sections",
+    source: {
+      id: "source:approved-private-feed",
+      label: "SECRET SOURCE LABEL",
+      kind: "approved-export",
+      readOnly: true,
+      asOf: generatedAt
+    },
+    sectionStates: {
+      today: { status: "complete", expectedCount: 1, asOf: generatedAt, freshness: "current", staleAfter: "2026-09-24T12:01:00Z" }
+    }
+  });
+  const { origin } = await fixture(t, { now: () => current, sectionFeedJson: JSON.stringify(feed) });
+  const { sessionCookie } = await signIn(origin);
+  current += 2 * 60 * 1000;
+  const response = await fetch(`${origin}/api/sections/today`, { headers: { Cookie: sessionCookie } });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.section.completeness.status, "complete");
+  assert.equal(body.servedAt, "2026-09-24T12:02:00.000Z");
+  assert.equal(body.section.completeness.receivedCount, 1);
+  assert.equal(body.section.freshness, "stale");
+  assert.equal(body.section.items[0].freshness, "stale");
+  assert.deepEqual(body.section.items[0].actions.map(action => action.label), ["Open details", "Open source"]);
+  const serialized = JSON.stringify(body);
+  assert.doesNotMatch(serialized, /SECRET SOURCE LABEL|sourceRef|sourceUrl|provenance|entityId|approved-private-feed/);
+  assert.match(serialized, /Verified current work/);
+});
+
+test("a restart after expiry projects mixed freshness as stale with a concrete boundary", async t => {
+  const generatedAt = "2026-09-24T12:00:00Z";
+  const staleAfter = "2026-09-24T12:01:00Z";
+  const baseRow = {
+    section: "today",
+    category: "task",
+    summary: null,
+    status: "open",
+    priority: 1,
+    needsOwner: false,
+    asOf: generatedAt,
+    dueAt: null,
+    startAt: null,
+    endAt: null,
+    tags: [],
+    actions: [{ type: "open_details", label: "Open details" }]
+  };
+  const feed = buildSectionFeedFromRows([
+    {
+      ...baseRow,
+      id: "item:today:expired-current",
+      entityId: "entity:work:expired-current",
+      title: "Expired current item",
+      freshness: "current",
+      staleAfter,
+      sourceRef: "record:expired-current"
+    },
+    {
+      ...baseRow,
+      id: "item:today:unknown",
+      entityId: "entity:work:unknown",
+      title: "Unknown-freshness item",
+      freshness: "unknown",
+      staleAfter: null,
+      sourceRef: "record:unknown"
+    }
+  ], {
+    generatedAt,
+    now: Date.parse(generatedAt),
+    feedId: "feed:test-expired-restart",
+    source: {
+      id: "source:approved-private-feed",
+      label: "PRIVATE SOURCE LABEL",
+      kind: "approved-export",
+      readOnly: true,
+      asOf: generatedAt
+    },
+    sectionStates: {
+      today: { status: "complete", expectedCount: 2, asOf: generatedAt, freshness: "unknown", staleAfter: null }
+    }
+  });
+  const restartedAt = Date.parse("2026-09-24T12:02:00Z");
+  const { origin } = await fixture(t, { now: () => restartedAt, sectionFeedJson: JSON.stringify(feed) });
+  const { sessionCookie } = await signIn(origin);
+  const response = await fetch(`${origin}/api/sections/today`, { headers: { Cookie: sessionCookie } });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.section.freshness, "stale");
+  assert.equal(body.section.staleAfter, staleAfter);
+  assert.deepEqual(body.section.items.map(item => item.freshness), ["stale", "unknown"]);
+  assert.doesNotMatch(JSON.stringify(body), /PRIVATE SOURCE LABEL|approved-private-feed|sourceRef|provenance/);
+});
+
+test("unavailable section responses retain failure semantics without exposing source metadata", async t => {
+  const generatedAt = "2026-09-24T12:00:00Z";
+  const feed = createUnavailableFeed({
+    generatedAt,
+    now: Date.parse(generatedAt),
+    feedId: "feed:test-unavailable-route",
+    reason: "PRIVATE PROVIDER FAILURE DETAIL",
+    sources: [{
+      id: "source:approved-private-feed",
+      label: "PRIVATE SOURCE LABEL",
+      kind: "approved-export",
+      readOnly: true,
+      asOf: generatedAt
+    }]
+  });
+  const { origin } = await fixture(t, { now: () => Date.parse(generatedAt), sectionFeedJson: JSON.stringify(feed) });
+  const { sessionCookie } = await signIn(origin);
+  const response = await fetch(`${origin}/api/sections/service`, { headers: { Cookie: sessionCookie } });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.section.completeness.status, "unavailable");
+  assert.equal(body.section.completeness.receivedCount, null);
+  assert.equal(body.section.completeness.reason, "The approved private source is currently unavailable.");
+  assert.deepEqual(body.section.items, []);
+  assert.doesNotMatch(JSON.stringify(body), /PRIVATE PROVIDER|PRIVATE SOURCE|approved-private-feed|sourceIds/);
+});
+
+test("repository data contract stays private-data-free and unknown is never coerced to zero", () => {
+  const root = path.resolve(__dirname, "..");
+  const sample = JSON.parse(fs.readFileSync(path.join(root, "data", "section-data.unconfigured.v1.json"), "utf8"));
+  assert.equal(sample.contractVersion, "utampa-section-feed.v1");
+  for (const section of Object.values(sample.sections)) {
+    assert.equal(section.completeness.status, "unconfigured");
+    assert.equal(section.completeness.receivedCount, null);
+    assert.deepEqual(section.items, []);
+  }
+});
+
+test("production workspaces fail closed instead of presenting synthetic operational data", () => {
   const root = path.resolve(__dirname, "..");
   const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
-  const runtime = fs.readFileSync(path.join(root, "assets", "index-D9RxFjnm.js"), "utf8");
+  const serverSource = fs.readFileSync(path.join(root, "server.js"), "utf8");
+  const browserServerSource = fs.readFileSync(path.join(root, "test", "browser-server.js"), "utf8");
+  const live = fs.readFileSync(path.join(root, "utampa-live.v1.js"), "utf8");
+  const liveCss = fs.readFileSync(path.join(root, "utampa-live.v1.css"), "utf8");
+
+  assert.match(html, /<title>My Work<\/title>/);
+  assert.doesNotMatch(html, /Answer Belly|Pinchers|Suncoast|Connected university source|Starter Project|assets\/page-/i);
+  assert.doesNotMatch(html, /__VINEXT_RSC|University of Tampa|Faculty OS/i);
+  assert.equal(fs.existsSync(path.join(root, "assets", "page-12y_z5zF.js")), false);
+  assert.equal(fs.existsSync(path.join(root, "boss", "app.js")), false);
+  assert.doesNotMatch(serverSource, /allowSynthetic/);
+  assert.match(serverSource, /UTAMPA_SYNTHETIC_OIDC is forbidden in the deployed server entrypoint/);
+  assert.match(browserServerSource, /listen\(port, "127\.0\.0\.1"/);
+  assert.match(live, /Today needs a verified work-item source/);
+  assert.match(live, /Teaching data is unavailable/);
+  assert.match(live, /Research data is unavailable/);
+  assert.match(live, /The synthetic Incubator fixture is disabled/);
+  assert.match(live, /People data is unavailable/);
+  assert.match(live, /Calendar event-title keywords are not evidence of program affiliation/);
+  assert.doesNotMatch(live, /renderServiceSchedule|AUTHORIZED CALENDAR TITLE MATCHES/);
+  assert.match(live, /response\.status === 401\) \{ renderSessionEnded\(\)/);
+  assert.match(live, /authRequired: true/);
+  assert.match(live, /sectionLoadGeneration/);
+  assert.match(live, /downgradeExpiredSectionFreshness/);
+  assert.match(live, /Previously displayed source data was removed/);
+  assert.match(live, /localStorage\.removeItem\(SECTION_ACTION_STORAGE_KEY\); localStorage\.removeItem\(STORAGE_KEY\)/);
+  assert.match(live, /\/api\/sections\//);
+  assert.match(live, /utampa-section-view\.v1/);
+  assert.match(live, /SECTION_ACTION_STORAGE_KEY = "utampa-section-actions-v1"/);
+  assert.match(live, /control\.textContent = action\.label/);
+  assert.match(live, /action\.type === "prepare"\) openDrawer/);
+  assert.match(live, /fixedBadge\.hidden = true/);
+  assert.match(live, /record\.hidden = true; record\.disabled = true/);
+  assert.match(liveCss, /\.topShell>:not\(\.ut-live-view\):not\(\.ut-calendar-panel\):not\(\.ut-source-status\)\{display:none!important\}/);
+  assert.match(liveCss, /\.sectionTabs button em,\.globalRecord,\.prepareHeader:not\(\.ut-live-ready\)\{display:none!important\}/);
+});
+
+test("standalone browser shell contains no compiled legacy payload and starts only approved add-ons", () => {
+  const root = path.resolve(__dirname, "..");
+  const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
   const evidence = fs.readFileSync(path.join(root, ".github", "workflows", "browser-evidence.yml"), "utf8");
 
-  assert.match(html, /<script type="module" id="_R_">import\("\/assets\/index-D9RxFjnm\.js"\)<\/script>/);
   assert.match(html, /<link rel="stylesheet" href="\/utampa-live\.v1\.css">/);
-  assert.doesNotMatch(html, /<script src="\/cc-/);
-  assert.match(html, /addEventListener\("utampa:app-committed",start,\{once:true\}\)/);
-  assert.match(html, /files=\["\/utampa-live\.v1\.js","\/cc-workspace-switcher\.v2\.js"/);
-  assert.match(html, /script\.onerror=function\(\)\{[^}]*loadNext\(index\+1\)/);
-  assert.match(runtime, /__UTAMPA_APP_COMMITTED__[\s\S]*utampa:app-committed[\s\S]*attachBrowserRouterState/);
+  assert.match(html, /<script src="\/utampa-live\.v1\.js" defer><\/script>/);
+  assert.match(html, /<script src="\/cc-workspace-switcher\.v2\.js" defer><\/script>/);
+  assert.doesNotMatch(html, /\/assets\/|__VINEXT_RSC|page-[A-Za-z0-9_-]+\.js/);
+  assert.match(html, /window\.__UTAMPA_APP_COMMITTED__=true/);
+  assert.match(html, /class="prepareHeader" disabled aria-hidden="true"/);
   assert.match(evidence, /window\.__UTAMPA_APP_COMMITTED__ === true/);
-  assert.match(evidence, /hasText: 'Teaching'[\s\S]*waitForSelector\('\.focusCourse'\)[\s\S]*hasText: 'Today'/);
+  assert.match(evidence, /waitForSelector\('\.ut-unavailable-view\[data-page="Today"\]'\)/);
+  assert.match(evidence, /Today needs a verified work-item source/);
+  assert.match(evidence, /Calendar event-title keywords are not evidence of program affiliation/);
 });
 
 test("runtime and exact-head evidence enforce the owner-approved personal identity", () => {
@@ -500,6 +855,6 @@ test("runtime and exact-head evidence enforce the owner-approved personal identi
     assert.doesNotMatch(source, /bert@utampa\.edu/i, relativePath);
   }
   const evidenceWorkflow = fs.readFileSync(path.join(root, ".github/workflows/browser-evidence.yml"), "utf8");
-  assert.match(evidenceWorkflow, /UTAMPA_ALLOWED_EMAIL:\s*bert@bertseither\.com/);
+  assert.match(evidenceWorkflow, /UTAMPA_ALLOWED_EMAIL:\s*owner@example\.test/);
   assert.match(evidenceWorkflow, /injected synthetic Google OIDC[^\n]*no real account or token/);
 });
