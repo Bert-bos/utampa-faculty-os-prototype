@@ -2,7 +2,7 @@
  * cc-workspace-switcher.v2.js
  * Wires the shared three-workspace switcher in the integrated dashboard shell.
  *
- * SUPERSEDES cc-workspace-switcher.v1.js (Drive 1k9LVbm7CwNGeSIy-lmmO8sXQ8f7aNNlV).
+ * SUPERSEDES the retired v1 workspace switcher.
  * Do not push v1. v2 is a strict superset; everything v1 did, v2 still does.
  *
  * Fixes defect D3 (Bert): the switcher shows labels but does not navigate.
@@ -31,9 +31,9 @@
   /* ---- The only block that changes when a workspace URL changes ---- */
   var WORKSPACES = [
     { key: 'utampa', match: /^u\s*tampa|faculty\s*os/i,
-      url: 'https://utampa-faculty-os-prototype.onrender.com/' },
+      url: 'https://utampa-faculty-os-prod.onrender.com/' },
     { key: 'bos',    match: /^bos\b|^boss\b/i,
-      url: 'https://utampa-faculty-os-prototype.onrender.com/boss/' },
+      url: null },
     { key: 'ep',     match: /entrepreneurship\s*professor/i,
       url: 'https://entrepreneurship-professor-prototype.onrender.com/' }
   ];
@@ -132,11 +132,22 @@
   }
 
   function boot() {
-    if (wire()) return;
+    wire();
     var tries = 0;
     var t = setInterval(function () {
       if (wire() || ++tries > 20) clearInterval(t);
     }, 150);
+
+    /* The exported VINEXT page can hydrate after this script has wired the
+       server-rendered header. Re-run against replacement nodes so the disabled
+       sibling state cannot disappear because of load timing. */
+    if (window.MutationObserver && document.body) {
+      var observer = new MutationObserver(function (records) {
+        var changed = records.some(function (record) { return record.addedNodes.length > 0; });
+        if (changed) wire();
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
   }
 
   if (document.readyState === 'loading') {

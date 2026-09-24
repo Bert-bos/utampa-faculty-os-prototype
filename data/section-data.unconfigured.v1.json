@@ -1,0 +1,83 @@
+{
+  "contractVersion": "utampa-section-feed.v1",
+  "feedId": "feed:unconfigured-example",
+  "generatedAt": "2026-01-01T00:00:00Z",
+  "sources": [],
+  "sections": {
+    "today": {
+      "id": "today",
+      "asOf": null,
+      "freshness": "unknown",
+      "staleAfter": null,
+      "completeness": {
+        "status": "unconfigured",
+        "expectedCount": null,
+        "receivedCount": null,
+        "reason": "No approved private source is configured for this section."
+      },
+      "sourceIds": [],
+      "allowedActions": [],
+      "items": []
+    },
+    "teaching": {
+      "id": "teaching",
+      "asOf": null,
+      "freshness": "unknown",
+      "staleAfter": null,
+      "completeness": {
+        "status": "unconfigured",
+        "expectedCount": null,
+        "receivedCount": null,
+        "reason": "No approved private source is configured for this section."
+      },
+      "sourceIds": [],
+      "allowedActions": [],
+      "items": []
+    },
+    "research": {
+      "id": "research",
+      "asOf": null,
+      "freshness": "unknown",
+      "staleAfter": null,
+      "completeness": {
+        "status": "unconfigured",
+        "expectedCount": null,
+        "receivedCount": null,
+        "reason": "No approved private source is configured for this section."
+      },
+      "sourceIds": [],
+      "allowedActions": [],
+      "items": []
+    },
+    "service": {
+      "id": "service",
+      "asOf": null,
+      "freshness": "unknown",
+      "staleAfter": null,
+      "completeness": {
+        "status": "unconfigured",
+        "expectedCount": null,
+        "receivedCount": null,
+        "reason": "No approved private source is configured for this section."
+      },
+      "sourceIds": [],
+      "allowedActions": [],
+      "items": []
+    },
+    "people": {
+      "id": "people",
+      "asOf": null,
+      "freshness": "unknown",
+      "staleAfter": null,
+      "completeness": {
+        "status": "unconfigured",
+        "expectedCount": null,
+        "receivedCount": null,
+        "reason": "No approved private source is configured for this section."
+      },
+      "sourceIds": [],
+      "allowedActions": [],
+      "items": []
+    }
+  }
+}

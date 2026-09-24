@@ -1,0 +1,1017 @@
+name: UTampa exact-head browser evidence
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser-evidence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RC_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      NODE_ENV: test
+      PORT: 4175
+      GOOGLE_CLIENT_ID: synthetic-client-id.apps.googleusercontent.com
+      GOOGLE_CLIENT_SECRET: synthetic-evidence-client-secret
+      GOOGLE_REDIRECT_URI: http://127.0.0.1:4175/auth/google/callback
+      UTAMPA_ALLOWED_EMAIL: owner@example.test
+      UTAMPA_SESSION_SECRET: synthetic-evidence-session-secret-32-chars
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Use Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+
+      - name: Verify exact checkout and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RC_SHA"
+          npm install --ignore-scripts --no-audit --no-fund
+          npm test
+          node test/browser-server.js >utampa.log 2>&1 &
+          PORT=4176 GOOGLE_REDIRECT_URI=http://127.0.0.1:4176/auth/google/callback UTAMPA_BROWSER_SECTION_FIXTURE=connected node test/browser-server.js >utampa-configured.log 2>&1 &
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:4175/healthz >/dev/null && curl -fsS http://127.0.0.1:4176/healthz >/dev/null; then exit 0; fi
+            sleep 0.5
+          done
+          cat utampa.log
+          cat utampa-configured.log
+          exit 1
+
+      - name: Capture synthetic exact-head browser states
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --no-save --ignore-scripts playwright@1.55.0
+          npx playwright install --with-deps chromium
+          mkdir -p evidence
+          cat > evidence.cjs <<'NODE'
+          const fs = require('fs');
+          const { chromium } = require('playwright');
+          const base = 'http://127.0.0.1:4175';
+          const configuredBase = 'http://127.0.0.1:4176';
+          const evidence = { exactHead: process.env.RC_SHA, identity: 'injected synthetic Google OIDC for a non-production test identity; no real account or token', data: 'fail-closed and browser-routed synthetic section-contract states plus synthetic Calendar/Drive metadata fixtures; no external private/protected source or real account was queried', screenshots: [], checks: {}, failures: [] };
+          const diagnostics = [];
+          const assert = (ok, message) => { if (!ok) evidence.failures.push(message); };
+          async function shot(page, name, authState) {
+            await page.screenshot({ path: 'evidence/' + name + '.png', fullPage: true });
+            evidence.screenshots.push(name + '.png');
+            const geometry = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
+            evidence.checks[name] = { authState, url: page.url(), title: await page.title(), text: (await page.locator('body').innerText()).slice(0, 1800), geometry };
+            return evidence.checks[name];
+          }
+          async function keyboardFocusEvidence(page, selector, maxTabs = 40) {
+            await page.evaluate(() => { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); });
+            for (let index = 0; index < maxTabs; index += 1) {
+              await page.keyboard.press('Tab');
+              const result = await page.evaluate(target => {
+                const active = document.activeElement;
+                if (!active || !active.matches(target)) return null;
+                const style = getComputedStyle(active);
+                return { reached: true, tag: active.tagName, text: (active.textContent || '').trim(), outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth, outlineColor: style.outlineColor };
+              }, selector);
+              if (result) return result;
+            }
+            return { reached: false };
+          }
+          async function waitForAppHydrated(page) {
+            await page.waitForFunction(() => window.__UTAMPA_APP_COMMITTED__ === true);
+            await page.waitForSelector('.ut-section-view[data-page="Today"],.ut-unavailable-view[data-page="Today"]');
+          }
+          async function login(page, next = '/', origin = base) {
+            await page.goto(origin + '/login?next=' + encodeURIComponent(next), { waitUntil: 'domcontentloaded' });
+            await Promise.all([page.waitForURL(origin + next), page.locator('[data-testid=google-sign-in]').click()]);
+            await waitForAppHydrated(page);
+            await page.waitForSelector('[data-cc-workspace="bos"][aria-disabled="true"]');
+            await page.waitForTimeout(250);
+            assert(await page.locator('input[type=password]').count() === 0, 'no local password field');
+            const me = await page.evaluate(async () => { const response = await fetch('/api/me'); return { status: response.status, body: await response.json() }; });
+            assert(me.status === 200 && me.body.email === 'owner@example.test', 'authenticated identity is the configured synthetic test account');
+          }
+          async function routeAuthorizedSources(page, options = {}) {
+            const future = hours => new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+            const events = options.events === undefined ? [{ id: 'event-1', title: 'ENT 330 · Venture Validation', start: future(2), end: future(3), location: 'Sykes 134', calendar: 'Personal test calendar', url: 'https://calendar.google.com/calendar/event?eid=synthetic', allDay: false }] : options.events;
+            const files = options.files === undefined ? [{ id: 'file-1', name: 'ENT 330 Venture Validation Deck', mimeType: 'application/vnd.google-apps.presentation', modifiedTime: '2026-09-22T15:00:00Z', url: 'https://drive.google.com/open?id=synthetic' }] : options.files;
+            const calendarStatus = options.calendarStatus || 200;
+            const calendarBody = calendarStatus === 401 ? { error: 'authentication_required' } : calendarStatus === 409 ? { error: 'reauthorization_required' } : calendarStatus >= 400 ? { error: 'calendar_unavailable' } : { events, source: 'Google Calendar · read-only test fixture', partial: Boolean(options.partial), truncated: Boolean(options.truncated), warnings: options.partial ? [{ code: 'calendar_unavailable', calendar: 'Synthetic unavailable source' }] : [] };
+            const driveStatus = options.driveStatus || 200;
+            const driveBody = driveStatus === 401 ? { error: 'authentication_required' } : driveStatus === 409 ? { error: 'reauthorization_required' } : driveStatus >= 400 ? { error: 'drive_unavailable' } : { files, source: 'Google Drive metadata (read-only test fixture)', truncated: Boolean(options.driveTruncated) };
+            await page.route('**/api/calendar', route => route.fulfill({ status: calendarStatus, contentType: 'application/json', body: JSON.stringify(calendarBody) }));
+            await page.route('**/api/drive**', route => route.fulfill({ status: driveStatus, contentType: 'application/json', body: JSON.stringify(driveBody) }));
+            if (options.sections || options.sectionStatus) {
+              await page.route('**/api/sections/*', route => {
+                const sectionId = new URL(route.request().url()).pathname.split('/').pop();
+                const status = options.sectionStatus || 200;
+                const body = status === 401
+                  ? { error: 'authentication_required' }
+                  : status >= 400
+                    ? { error: 'section_unavailable' }
+                    : options.sections && options.sections[sectionId];
+                return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body || { error: 'not_found' }) });
+              });
+            }
+          }
+          function sectionView(sectionId, config = {}) {
+            const generatedAt = config.generatedAt || new Date().toISOString();
+            const items = config.items || [];
+            const status = config.status || 'complete';
+            const hasRecords = status === 'complete' || status === 'partial';
+            return {
+              viewVersion: 'utampa-section-view.v1',
+              feedId: config.feedId || 'feed:browser-contract-v1',
+              generatedAt,
+              servedAt: config.servedAt || new Date().toISOString(),
+              section: {
+                id: sectionId,
+                asOf: config.asOf !== undefined ? config.asOf : hasRecords ? generatedAt : null,
+                freshness: config.freshness || (hasRecords ? 'current' : 'unknown'),
+                staleAfter: config.staleAfter !== undefined ? config.staleAfter : hasRecords ? new Date(Date.now() + 60 * 60 * 1000).toISOString() : null,
+                completeness: {
+                  status,
+                  expectedCount: config.expectedCount === undefined ? hasRecords ? items.length : null : config.expectedCount,
+                  receivedCount: hasRecords ? items.length : null,
+                  ...(config.reason ? { reason: config.reason } : {})
+                },
+                items
+              }
+            };
+          }
+          function sectionItem(section, id, title, config = {}) {
+            const asOf = config.asOf || new Date().toISOString();
+            return {
+              id,
+              section,
+              category: config.category || 'task',
+              title,
+              summary: config.summary === undefined ? 'Sanitized browser evidence summary.' : config.summary,
+              status: config.status || 'open',
+              priority: config.priority === undefined ? 1 : config.priority,
+              needsOwner: config.needsOwner === undefined ? true : config.needsOwner,
+              asOf,
+              freshness: config.freshness || 'current',
+              staleAfter: config.staleAfter || new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+              dueAt: config.dueAt || null,
+              startAt: config.startAt || null,
+              endAt: config.endAt || null,
+              tags: config.tags || ['approved-fixture'],
+              actions: config.actions || []
+            };
+          }
+          function connectedSectionFixtures() {
+            const literalTitle = 'Same title <img src=x onerror="window.__sectionXss=1">';
+            const current = new Date().toISOString();
+            const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+            const staleAsOf = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+            const stale = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+            return {
+              literalTitle,
+              sections: {
+                today: sectionView('today', { items: [
+                  sectionItem('today', 'item:opaque-alpha', literalTitle, {
+                    summary: '<script>window.__sectionXss=2</script> literal summary', asOf: current, staleAfter: future,
+                    actions: [
+                      { type: 'open_details', label: 'Open details' },
+                      { type: 'open_source', label: 'Open source', href: 'https://docs.google.com/document/d/synthetic-view' },
+                      { type: 'prepare', label: 'Prepare locally' },
+                      { type: 'complete_local', label: 'Complete locally' }
+                    ]
+                  }),
+                  sectionItem('today', 'item:opaque-beta', literalTitle, {
+                    summary: 'Second same-title item with its own opaque identity.', asOf: current, staleAfter: future,
+                    actions: [
+                      { type: 'open_details', label: 'Open details' },
+                      { type: 'open_section', label: 'Open section', targetSection: 'research' },
+                      { type: 'dismiss_local', label: 'Dismiss locally' },
+                      { type: 'stage_route_local', label: 'Stage route locally' }
+                    ]
+                  })
+                ] }),
+                teaching: sectionView('teaching', { status: 'unavailable', expectedCount: null, items: [], reason: 'The approved private source is currently unavailable.' }),
+                research: sectionView('research', { asOf: staleAsOf, freshness: 'stale', staleAfter: stale, items: [
+                  sectionItem('research', 'item:opaque-research', 'Verified research checkpoint', { asOf: staleAsOf, freshness: 'stale', staleAfter: stale, actions: [{ type: 'open_details', label: 'Open details' }] })
+                ] }),
+                service: sectionView('service', { status: 'partial', expectedCount: 3, items: [], reason: 'The approved source returned an incomplete result.' }),
+                people: sectionView('people', { status: 'complete', expectedCount: 0, items: [] })
+              }
+            };
+          }
+          (async () => {
+            const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+            evidence.runtime = { node: process.version, playwright: require('playwright/package.json').version, browser: await browser.version() };
+            async function newPage(options) {
+              const page = await browser.newPage(options);
+              page.on('pageerror', error => diagnostics.push('pageerror: ' + String(error)));
+              page.on('console', message => {
+                const expected = page.__expectedFailedResource;
+                const source = message.location()?.url || '';
+                if (expected && source && new URL(source).pathname === expected) return;
+                if (message.type() === 'error' && !/^Failed to load resource: the server responded with a status of \d+/.test(message.text())) diagnostics.push('console: ' + message.text());
+              });
+              page.on('requestfailed', request => {
+                if (page.__expectedFailedResource && new URL(request.url()).pathname === page.__expectedFailedResource) return;
+                if (!/ERR_ABORTED/.test(request.failure()?.errorText || '')) diagnostics.push('requestfailed: ' + request.url() + ' · ' + (request.failure()?.errorText || 'unknown'));
+              });
+              page.on('response', response => {
+                const target = new URL(response.url());
+                if (target.origin !== base || response.status() < 400) return;
+                if (target.pathname === '/boss/' || target.pathname === '/api/calendar' || target.pathname === '/api/drive' || target.pathname.startsWith('/api/sections/')) return;
+                diagnostics.push('http ' + response.status() + ': ' + response.url());
+              });
+              return page;
+            }
+            try {
+              for (const [name, width, height] of [['01-login-desktop-1440',1440,1000],['02-login-mobile-390',390,844],['03-login-mobile-375',375,812],['03b-login-mobile-320',320,568]]) {
+                const page = await newPage({ viewport: { width, height } });
+                await page.goto(base + '/login', { waitUntil: 'domcontentloaded' });
+                const state = await shot(page, name, 'unauthenticated-entry');
+                assert(/continue with google/i.test(state.text), name + ' Google identity entry');
+                assert(/^My Work Login/m.test(state.text), name + ' neutral login label');
+                assert(!/University of Tampa|Faculty OS/i.test(state.text), name + ' no University branding');
+                assert(/read-only Calendar event metadata and Drive filename metadata visible to this personal Google account/i.test(state.text), name + ' pre-consent personal metadata disclosure');
+                assert(/University accounts, Canvas, Workday, student records, and institutional systems are not connected/i.test(state.text), name + ' pre-consent institutional boundary');
+                assert(state.geometry.scrollWidth <= state.geometry.clientWidth, name + ' overflow');
+                const buttonHeight = await page.locator('[data-testid=google-sign-in]').evaluate(node => node.getBoundingClientRect().height);
+                assert(buttonHeight >= 44, name + ' touch target');
+                const focusEvidence = await keyboardFocusEvidence(page, '[data-testid=google-sign-in]');
+                state.googleKeyboardFocus = focusEvidence;
+                assert(focusEvidence.reached && focusEvidence.outlineStyle !== 'none' && parseFloat(focusEvidence.outlineWidth) >= 3, name + ' visible Google keyboard focus');
+                if (name === '02-login-mobile-390') {
+                  await page.screenshot({ path: 'evidence/14-login-keyboard-focus-mobile-390.png', fullPage: true });
+                  evidence.screenshots.push('14-login-keyboard-focus-mobile-390.png');
+                }
+                await page.evaluate(() => document.querySelector('[data-testid=google-sign-in]').addEventListener('click', event => event.preventDefault(), { capture: true, once: true }));
+                await page.locator('[data-testid=google-sign-in]').click();
+                const loadingEvidence = await page.locator('#auth-status').evaluate(node => ({ text: node.textContent, role: node.getAttribute('role'), live: node.getAttribute('aria-live'), atomic: node.getAttribute('aria-atomic') }));
+                state.assistiveLoading = loadingEvidence;
+                assert(/opening google sign-in/i.test(loadingEvidence.text || '') && loadingEvidence.role === 'status' && loadingEvidence.live === 'polite' && loadingEvidence.atomic === 'true', name + ' assistive loading announcement');
+                await page.close();
+              }
+
+              const error = await newPage({ viewport: { width: 390, height: 844 } });
+              await error.goto(base + '/login?error=sign-in');
+              await error.waitForSelector('[role=alert]');
+              const errorState = await shot(error, '04-oauth-error-mobile-390', 'oauth-error-local-only');
+              assert(/could not complete sign-in/i.test(errorState.text), 'safe OAuth error message');
+              assert(await error.locator('[role=alert]').evaluate(node => document.activeElement === node), 'error focus');
+              const errorAnnouncement = await error.locator('[role=alert]').evaluate(node => ({ role: node.getAttribute('role'), live: node.getAttribute('aria-live'), atomic: node.getAttribute('aria-atomic'), focused: document.activeElement === node }));
+              errorState.assistiveError = errorAnnouncement;
+              assert(errorAnnouncement.role === 'alert' && errorAnnouncement.live === 'assertive' && errorAnnouncement.atomic === 'true' && errorAnnouncement.focused, 'assistive OAuth error announcement and focus return');
+              assert(errorState.geometry.scrollWidth <= errorState.geometry.clientWidth, 'error overflow');
+              await error.close();
+
+              const denied = await newPage({ viewport: { width: 390, height: 844 } });
+              await denied.goto(base + '/service/spartan-incubator', { waitUntil: 'domcontentloaded' });
+              const deniedState = await shot(denied, '05-unauthenticated-deep-link-denied', 'unauthenticated-denied');
+              assert(/\/login\?next=/.test(deniedState.url), 'unauthenticated deep link redirected');
+              assert(!/Spartan Incubator Service/i.test(deniedState.text), 'private dashboard not disclosed');
+              await denied.close();
+
+              const addOnFailure = await newPage({ viewport: { width: 390, height: 844 } });
+              addOnFailure.__expectedFailedResource = '/utampa-live.v1.js';
+              await addOnFailure.route('**/utampa-live.v1.js', route => route.abort());
+              await addOnFailure.goto(base + '/login', { waitUntil: 'domcontentloaded' });
+              await Promise.all([addOnFailure.waitForURL(base + '/'), addOnFailure.locator('[data-testid=google-sign-in]').click()]);
+              await addOnFailure.waitForSelector('.prepareHeader', { state: 'attached' });
+              assert(await addOnFailure.title() === 'My Work', 'standalone authenticated shell has the neutral My Work title');
+              assert(await addOnFailure.locator('.prepareHeader').isHidden() && await addOnFailure.locator('.prepareHeader').isDisabled(), 'Prepare Me fails closed when the live add-on does not load');
+              assert(await addOnFailure.locator('.globalRecord').isHidden() && await addOnFailure.locator('.globalRecord').isDisabled(), 'recording remains hidden and disabled when the live add-on does not load');
+              assert(!/Connected university source|Approve \+ continue|Answer Belly|Pinchers|Suncoast/.test(await addOnFailure.locator('body').innerText()), 'standalone shell contains no legacy operational claims');
+              await addOnFailure.close();
+
+              const configuredRoute = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(configuredRoute);
+              await login(configuredRoute, '/', configuredBase);
+              await configuredRoute.waitForSelector('.ut-section-view[data-page="Today"] .ut-section-item');
+              const configuredApi = await configuredRoute.evaluate(async () => { const response = await fetch('/api/sections/today'); return { status: response.status, body: await response.json() }; });
+              assert(configuredApi.status === 200 && configuredApi.body.feedId === 'feed:browser-real-route' && configuredApi.body.section.completeness.status === 'complete', 'configured feed passes through the real authenticated server route');
+              assert(/Configured server route item/.test(await configuredRoute.locator('.ut-section-view[data-page="Today"]').innerText()), 'configured server feed renders without a browser section-route mock');
+              await configuredRoute.close();
+
+              for (const [name, width, height] of [['06-dashboard-desktop-1440',1440,1000],['07-dashboard-mobile-390',390,844],['08-dashboard-mobile-375',375,812],['08b-dashboard-mobile-320',320,568],['08c-dashboard-landscape-844',844,390]]) {
+                const page = await newPage({ viewport: { width, height } });
+                await routeAuthorizedSources(page);
+                await login(page);
+                await page.waitForSelector('.ut-source-status[data-page="Today"]');
+                await page.waitForSelector('.ut-unavailable-view[data-page="Today"]');
+                await page.waitForSelector('.ut-live-countdown[data-state="ready"]');
+                const state = await shot(page, name, 'authenticated-synthetic-oidc');
+                assert(state.title === 'My Work', name + ' neutral authenticated document title');
+                assert(state.geometry.scrollWidth <= state.geometry.clientWidth, name + ' overflow');
+                const bos = page.locator('[data-cc-workspace="bos"]');
+                assert(await bos.getAttribute('aria-disabled') === 'true', name + ' BOS disabled');
+                assert(/not deployed/i.test(await bos.getAttribute('title') || ''), name + ' BOS pending title');
+                const switcherFocus = await keyboardFocusEvidence(page, '[data-cc-workspace="bos"]');
+                state.switcherKeyboardFocus = switcherFocus;
+                assert(switcherFocus.reached && switcherFocus.outlineStyle !== 'none' && parseFloat(switcherFocus.outlineWidth) >= 2, name + ' visible switcher keyboard focus');
+                if (name === '07-dashboard-mobile-390') {
+                  await page.screenshot({ path: 'evidence/15-dashboard-switcher-keyboard-focus-mobile-390.png', fullPage: true });
+                  evidence.screenshots.push('15-dashboard-switcher-keyboard-focus-mobile-390.png');
+                }
+                const bodyText = await page.locator('body').innerText();
+                state.truthfulWorkspace = /Today needs a verified work-item source/.test(bodyText) && /SOURCE NOT CONNECTED/.test(bodyText);
+                assert(state.truthfulWorkspace, name + ' Today fails closed without an approved work-item feed');
+                assert(!/Prepare class, unblock the Incubator|4 NEED BERT|Teaching 42%/.test(bodyText), name + ' synthetic priorities and metrics hidden');
+                assert(await page.locator('.sectionTabs button em:visible').count() === 0, name + ' fixed section badges hidden');
+                if (name === '06-dashboard-desktop-1440') {
+                  const unconfiguredShape = await page.evaluate(async () => (await fetch('/api/sections/today')).json());
+                  assert(unconfiguredShape.section.asOf === null && unconfiguredShape.section.staleAfter === null && unconfiguredShape.section.freshness === 'unknown' && unconfiguredShape.section.completeness.expectedCount === null && unconfiguredShape.section.completeness.receivedCount === null, 'unconfigured section preserves unknown versus verified-zero semantics');
+                }
+                assert(/ENT 330 · Venture Validation/.test(await page.locator('.ut-live-countdown').getAttribute('aria-label') || ''), name + ' live next-event countdown');
+                assert(!/MINUTES TO NEXT/.test(bodyText), name + ' fabricated static countdown hidden');
+                await page.close();
+              }
+
+              const recorder = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(recorder);
+              await login(recorder);
+              await recorder.waitForSelector('.ut-live-countdown[data-state="ready"]');
+              assert(await recorder.locator('.globalRecord').isHidden(), 'unsupported recording control is not presented as operational');
+              assert(await recorder.locator('.globalRecord').isDisabled(), 'unsupported recording control is disabled');
+              assert(await recorder.locator('#cc-recorder.is-open').count() === 0, 'recording preview is not opened');
+              await recorder.close();
+
+              const failSafe = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(failSafe);
+              await login(failSafe);
+              const response = await failSafe.goto(base + '/boss/', { waitUntil: 'domcontentloaded' });
+              const failState = await shot(failSafe, '09-bos-direct-link-fail-safe-404', 'authenticated-sibling-denied');
+              assert(response.status() === 404 && /not found/i.test(failState.text), 'BOS direct route fail safe');
+              await failSafe.close();
+
+              const replay = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(replay);
+              await login(replay);
+              const oldCookie = (await replay.context().cookies()).find(cookie => cookie.name === 'utampa_session');
+              assert(Boolean(oldCookie), 'session cookie exists before logout');
+              await replay.evaluate(async () => { await fetch('/logout', { method: 'POST' }); });
+              await replay.context().addCookies([oldCookie]);
+              await replay.goto(base + '/', { waitUntil: 'domcontentloaded' });
+              const replayState = await shot(replay, '10-logout-replay-denied', 'logged-out-replay-denied');
+              assert(/\/login\?next=/.test(replayState.url), 'revoked session replay redirected');
+              assert(!/Spartan Incubator Service/i.test(replayState.text), 'revoked session disclosed no dashboard');
+              await replay.close();
+
+              const actions = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(actions);
+              await login(actions);
+              await actions.waitForSelector('.ut-unavailable-view[data-page="Today"]');
+              assert(await actions.locator('.todayTask:visible').count() === 0, 'unverified Today tasks are not actionable');
+              await actions.waitForSelector('.ut-source-status .ut-mobile-actions-center');
+              await actions.locator('.ut-source-status .ut-mobile-actions-center').click();
+              await actions.waitForSelector('.ut-live-drawer');
+              const actionState = await shot(actions, '11-action-center-empty', 'authenticated-no-local-actions');
+              assert(/No saved actions/.test(await actions.locator('.ut-live-drawer').innerText()), 'Action Center does not invent work-item history');
+              await actions.locator('.ut-live-drawer .drawerClose').click();
+              await actions.close();
+
+              const service = await newPage({ viewport: { width: 844, height: 390 } });
+              const serviceEvents = Array.from({ length: 9 }, (_, index) => ({
+                id: 'event-service-' + index,
+                title: 'Spartan Incubator Calendar title match ' + (index + 1),
+                start: new Date(Date.now() + (index + 2) * 60 * 60 * 1000).toISOString(),
+                end: new Date(Date.now() + (index + 3) * 60 * 60 * 1000).toISOString(),
+                calendar: 'UTampa Outlook test feed',
+                url: 'https://calendar.google.com/calendar/event?eid=service-' + index,
+                allDay: false
+              }));
+              await routeAuthorizedSources(service, { events: serviceEvents, files: [{ id: 'file-service', name: 'Spartan Incubator mentor notes', mimeType: 'application/vnd.google-apps.document', modifiedTime: '2026-09-22T15:00:00Z', url: 'https://drive.google.com/open?id=service' }], driveTruncated: true });
+              await login(service);
+              await service.locator('.sectionTabs button', { hasText: 'Teaching' }).click();
+              await service.waitForSelector('.ut-unavailable-view[data-page="Teaching"]');
+              await service.waitForSelector('.ut-source-status[data-page="Teaching"]');
+              assert(/COURSE SOURCE NOT CONNECTED/.test(await service.locator('.ut-source-status').innerText()), 'Teaching source state');
+              assert(/Teaching data is unavailable/.test(await service.locator('.ut-unavailable-view').innerText()), 'Teaching fails closed');
+              assert(await service.locator('.focusCourse:visible,.phoneChat:visible').count() === 0, 'unverified Teaching content and messaging are hidden');
+              await service.locator('.sectionTabs button', { hasText: 'Research' }).click();
+              await service.waitForSelector('.ut-unavailable-view[data-page="Research"]');
+              await service.waitForSelector('.ut-source-status[data-page="Research"]');
+              assert(/PROJECT SOURCE NOT CONNECTED/.test(await service.locator('.ut-source-status').innerText()), 'Research source state');
+              assert(/Research data is unavailable/.test(await service.locator('.ut-unavailable-view').innerText()), 'Research fails closed');
+              assert(await service.locator('.pipeline:visible,.project:visible').count() === 0, 'unverified Research stages and actions are hidden');
+              let serviceCalendarRequests = 0;
+              service.on('request', request => { if (new URL(request.url()).pathname === '/api/calendar') serviceCalendarRequests += 1; });
+              await service.locator('.sectionTabs button', { hasText: 'Service' }).click();
+              await service.waitForSelector('.ut-unavailable-view[data-page="Service"]');
+              await service.waitForSelector('.ut-source-status[data-page="Service"]');
+              const serviceState = await shot(service, '12-page-specific-workspaces', 'authenticated-page-specific-workspaces');
+              assert(/PROGRAM SOURCE NOT CONNECTED/.test(await service.locator('.ut-source-status').innerText()), 'Service source state');
+              assert(/Service data is unavailable/.test(await service.locator('.ut-unavailable-view').innerText()), 'Service fails closed');
+              assert(/Calendar event-title keywords are not evidence of program affiliation/.test(await service.locator('.ut-unavailable-view').innerText()), 'Service rejects title-keyword affiliation inference');
+              assert(!/Spartan Incubator Calendar title match 1/.test(await service.locator('.ut-unavailable-view[data-page="Service"]').innerText()), 'Calendar titles do not populate Service');
+              assert(serviceCalendarRequests === 0, 'opening Service does not query Calendar as a program source');
+              assert(await service.locator('.serviceTopGrid:visible,.founderPortal:visible,.reviewModal:visible').count() === 0, 'unverified Service operations and actions are hidden');
+              await service.locator('.sectionTabs button', { hasText: 'People' }).click();
+              await service.waitForSelector('.ut-unavailable-view[data-page="People"]');
+              await service.waitForSelector('.ut-source-status[data-page="People"]');
+              assert(/DIRECTORY SOURCE NOT CONNECTED/.test(await service.locator('.ut-source-status').innerText()), 'People data boundary');
+              assert(/People data is unavailable/.test(await service.locator('.ut-unavailable-view').innerText()), 'People fails closed');
+              assert(await service.locator('.peopleWorkspace:visible').count() === 0, 'unverified people cards are hidden');
+              await service.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await service.waitForSelector('.ut-calendar-panel .ut-event');
+              assert(await service.locator('.ut-calendar-panel .ut-event').count() === 9, 'Calendar shows authorized events without a silent eight-item cap');
+              assert(/Spartan Incubator Calendar title match 1/.test(await service.locator('.ut-calendar-panel').innerText()), 'Calendar authorized live content');
+              await service.locator('.ut-calendar-panel .ut-mobile-prepare').click();
+              await service.waitForSelector('.ut-live-drawer .ut-file');
+              assert(/Spartan Incubator mentor notes/.test(await service.locator('.ut-live-drawer').innerText()), 'Prepare Me related Drive source');
+              assert(/PARTIAL DRIVE RESULTS/.test(await service.locator('.ut-live-drawer').innerText()), 'Prepare Me discloses truncated Drive filename results');
+              await service.close();
+
+              for (const [name, width, height] of [['12b-service-desktop-1440',1440,900],['12c-service-mobile-390',390,844],['12d-service-mobile-375',375,812]]) {
+                const page = await newPage({ viewport: { width, height } });
+                const start = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+                const end = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
+                await routeAuthorizedSources(page, { events: [{ id: 'portrait-service', title: 'Spartan Incubator portrait workflow', start, end, calendar: 'Authorized Outlook test feed', url: 'https://calendar.google.com/calendar/event?eid=portrait-service', allDay: false }] });
+                await login(page);
+                await page.locator('.sectionTabs button', { hasText: 'Service' }).click();
+                await page.waitForSelector('.ut-unavailable-view[data-page="Service"]');
+                const serviceViewportState = await shot(page, name, 'authenticated-service-source-not-connected');
+                assert(serviceViewportState.geometry.scrollWidth <= serviceViewportState.geometry.clientWidth, name + ' no horizontal overflow');
+                assert(/Service data is unavailable/.test(await page.locator('.ut-unavailable-view').innerText()), name + ' source-aware unavailable state');
+                assert(!/Spartan Incubator portrait workflow/.test(await page.locator('.ut-unavailable-view[data-page="Service"]').innerText()), name + ' Calendar title does not populate Service');
+                const stateTargets = await page.locator('.ut-state-actions button').evaluateAll(nodes => nodes.map(node => ({ width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height })));
+                assert(stateTargets.every(target => target.width >= 44 && target.height >= 44), name + ' connected-tool controls are touch sized');
+                await page.close();
+              }
+
+              const contractFixture = connectedSectionFixtures();
+              const contract = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(contract, { sections: contractFixture.sections });
+              await login(contract);
+              await contract.waitForSelector('.ut-section-view[data-page="Today"] .ut-section-item');
+              const contractToday = await shot(contract, '12e-section-contract-today-mobile-390', 'authenticated-synthetic-section-contract');
+              assert(contractToday.geometry.scrollWidth <= contractToday.geometry.clientWidth, 'connected Today 390px overflow');
+              const todayItems = contract.locator('.ut-section-view[data-page="Today"] .ut-section-item');
+              assert(await todayItems.count() === 2, 'complete Today renders exactly the two verified items');
+              const todayTitles = await todayItems.locator('h3').allTextContents();
+              assert(todayTitles.length === 2 && todayTitles.every(title => title === contractFixture.literalTitle), 'same-title items retain their independent opaque identities');
+              assert(await contract.locator('.ut-section-view[data-page="Today"] .ut-section-item img,.ut-section-view[data-page="Today"] .ut-section-item script').count() === 0, 'literal markup from section data is not parsed as DOM');
+              assert(await contract.evaluate(() => typeof window.__sectionXss === 'undefined'), 'literal section markup never executes');
+              assert((await todayItems.nth(0).innerText()).includes('<script>window.__sectionXss=2</script> literal summary'), 'literal XSS-like summary is shown as inert text');
+              assert(await contract.locator('.todayTask:visible').count() === 0, 'compiled Today sample UI stays hidden when verified items render');
+              assert(await contract.locator('.sectionTabs button', { hasText: 'Today' }).locator('.ut-section-count').innerText() === '2', 'complete Today count is sourced from the section contract');
+              const sourceLink = todayItems.nth(0).locator('[data-section-action="open_source"]');
+              const sourceLinkAttributes = await sourceLink.evaluate(node => ({ href: node.getAttribute('href'), target: node.getAttribute('target'), rel: node.getAttribute('rel') || '' }));
+              assert(sourceLinkAttributes.href === 'https://docs.google.com/document/d/synthetic-view' && sourceLinkAttributes.target === '_blank' && /\bnoopener\b/.test(sourceLinkAttributes.rel) && /\bnoreferrer\b/.test(sourceLinkAttributes.rel), 'open_source is a hardened external read-only link');
+              await todayItems.nth(1).locator('[data-section-action="open_section"]').click();
+              await contract.waitForSelector('.ut-section-view[data-page="Research"]');
+              assert(/Verified research checkpoint/.test(await contract.locator('.ut-section-view[data-page="Research"]').innerText()), 'open_section navigates to its contract-defined section');
+              await contract.locator('.sectionTabs button', { hasText: 'Today' }).click();
+              await contract.waitForSelector('.ut-section-view[data-page="Today"] .ut-section-item');
+
+              let contractDriveRequests = 0;
+              contract.on('request', request => { if (new URL(request.url()).pathname === '/api/drive') contractDriveRequests += 1; });
+              await todayItems.nth(0).locator('[data-section-action="open_details"]').click();
+              await contract.waitForSelector('.ut-live-drawer');
+              assert((await contract.locator('.ut-live-drawer').innerText()).includes('<script>window.__sectionXss=2</script> literal summary'), 'details drawer preserves literal safe text');
+              assert(await contract.locator('.ut-live-drawer img,.ut-live-drawer script').count() === 0, 'details drawer does not parse source markup');
+              await contract.locator('.ut-live-drawer .drawerClose').click();
+              await todayItems.nth(0).locator('[data-section-action="prepare"]').click();
+              await contract.waitForFunction(() => document.body.innerText.includes('Local preparation view'));
+              assert(/Source status: open · current/.test(await contract.locator('.ut-live-drawer').innerText()), 'section prepare opens a truthful local-only view');
+              await contract.locator('.ut-live-drawer .drawerClose').click();
+              assert(contractDriveRequests === 0, 'section Prepare locally never queries Drive');
+
+              await todayItems.nth(0).locator('[data-section-action="complete_local"]').click();
+              await contract.waitForFunction(() => document.querySelectorAll('.ut-section-item')[0]?.innerText.includes('Completed locally'));
+              assert(/Completed locally/.test(await todayItems.nth(0).locator('.ut-item-local-state').innerText()), 'first same-title item receives its own local completion');
+              assert(await todayItems.nth(1).locator('.ut-item-local-state').isHidden(), 'second same-title item is unchanged by the first item action');
+              let storedActions = await contract.evaluate(() => localStorage.getItem('utampa-section-actions-v1') || '');
+              assert(storedActions.includes('item:opaque-alpha') && !storedActions.includes(contractFixture.literalTitle) && !storedActions.includes('literal summary'), 'browser state stores the opaque first item ID without copied source text');
+
+              await contract.reload({ waitUntil: 'domcontentloaded' });
+              await waitForAppHydrated(contract);
+              const reloadedItems = contract.locator('.ut-section-view[data-page="Today"] .ut-section-item');
+              assert(/Completed locally/.test(await reloadedItems.nth(0).locator('.ut-item-local-state').innerText()), 'first opaque item action persists after reload');
+              assert(await reloadedItems.nth(1).locator('.ut-item-local-state').isHidden(), 'same-title second item remains independent after reload');
+              await reloadedItems.nth(1).locator('[data-section-action="stage_route_local"]').click();
+              await contract.waitForSelector('.ut-live-drawer .ut-route-choices');
+              assert(/Nobody will be notified/.test(await contract.locator('.ut-live-drawer').innerText()), 'stage_route_local discloses that routing is browser-local only');
+              await contract.locator('.ut-live-drawer .ut-route-choices button', { hasText: 'BOS' }).click();
+              await contract.waitForFunction(() => document.querySelectorAll('.ut-section-item')[1]?.innerText.includes('Route staged locally for BOS'));
+              storedActions = await contract.evaluate(() => JSON.parse(localStorage.getItem('utampa-section-actions-v1') || '{}'));
+              assert(Object.values(storedActions).some(record => record.itemId === 'item:opaque-beta' && record.actionType === 'stage_route_local' && record.target === 'BOS'), 'stage_route_local persists only the opaque item ID and fixed local route target');
+              await contract.reload({ waitUntil: 'domcontentloaded' });
+              await waitForAppHydrated(contract);
+              const routeReloadedItems = contract.locator('.ut-section-view[data-page="Today"] .ut-section-item');
+              assert(/Route staged locally for BOS · nobody notified/.test(await routeReloadedItems.nth(1).locator('.ut-item-local-state').innerText()), 'local route staging persists with its no-notification disclosure');
+              await routeReloadedItems.nth(1).locator('[data-section-action="dismiss_local"]').click();
+              await contract.waitForFunction(() => document.querySelectorAll('.ut-section-item')[1]?.innerText.includes('Dismissed locally'));
+              storedActions = await contract.evaluate(() => JSON.parse(localStorage.getItem('utampa-section-actions-v1') || '{}'));
+              assert(Object.keys(storedActions).length === 2 && Object.values(storedActions).some(record => record.itemId === 'item:opaque-alpha' && record.actionType === 'complete_local') && Object.values(storedActions).some(record => record.itemId === 'item:opaque-beta' && record.actionType === 'dismiss_local'), 'same-title actions persist independently by opaque ID');
+              await contract.reload({ waitUntil: 'domcontentloaded' });
+              await waitForAppHydrated(contract);
+              const twiceReloadedItems = contract.locator('.ut-section-view[data-page="Today"] .ut-section-item');
+              assert(/Completed locally/.test(await twiceReloadedItems.nth(0).locator('.ut-item-local-state').innerText()) && /Dismissed locally/.test(await twiceReloadedItems.nth(1).locator('.ut-item-local-state').innerText()), 'both independent local actions survive reload');
+              await contract.evaluate(() => {
+                const records = JSON.parse(localStorage.getItem('utampa-section-actions-v1') || '{}');
+                records['feed:browser-contract-v1|item:opaque-alpha'].section = 'research';
+                records['not-a-feed|item:opaque-malformed'] = { feedId: 'not-a-feed', itemId: 'item:opaque-malformed', section: 'today', actionType: 'complete_local', target: '', updatedAt: new Date().toISOString() };
+                records['feed:malformed-action|item:opaque-target'] = { feedId: 'feed:malformed-action', itemId: 'item:opaque-target', section: 'today', actionType: 'complete_local', target: 'BOS', updatedAt: new Date().toISOString() };
+                records['feed:malformed-route|item:opaque-target'] = { feedId: 'feed:malformed-route', itemId: 'item:opaque-target', section: 'today', actionType: 'stage_route_local', target: '', updatedAt: new Date().toISOString() };
+                records['feed:malformed-time|item:opaque-time'] = { feedId: 'feed:malformed-time', itemId: 'item:opaque-time', section: 'today', actionType: 'complete_local', target: '', updatedAt: 'not-a-timestamp' };
+                localStorage.setItem('utampa-section-actions-v1', JSON.stringify(records));
+              });
+              await contract.reload({ waitUntil: 'domcontentloaded' });
+              await waitForAppHydrated(contract);
+              const hardenedStateItems = contract.locator('.ut-section-view[data-page="Today"] .ut-section-item');
+              assert(await hardenedStateItems.nth(0).locator('.ut-item-local-state').isHidden(), 'a persisted record for the wrong section cannot mark a visible item');
+              assert(/Dismissed locally/.test(await hardenedStateItems.nth(1).locator('.ut-item-local-state').innerText()), 'a valid local item state survives rejection of malformed neighbors');
+              const hardenedRecords = await contract.evaluate(() => JSON.parse(localStorage.getItem('utampa-section-actions-v1') || '{}'));
+              assert(Object.keys(hardenedRecords).length === 2 && !hardenedRecords['not-a-feed|item:opaque-malformed'] && !hardenedRecords['feed:malformed-action|item:opaque-target'] && !hardenedRecords['feed:malformed-route|item:opaque-target'] && !hardenedRecords['feed:malformed-time|item:opaque-time'], 'malformed typed IDs, action-target combinations, and timestamps are rejected');
+              await contract.evaluate(() => {
+                const records = JSON.parse(localStorage.getItem('utampa-section-actions-v1') || '{}');
+                records['feed:browser-contract-v1|item:opaque-alpha'].section = 'today';
+                localStorage.setItem('utampa-section-actions-v1', JSON.stringify(records));
+              });
+              await contract.reload({ waitUntil: 'domcontentloaded' });
+              await waitForAppHydrated(contract);
+              assert(/Completed locally/.test(await contract.locator('.ut-section-view[data-page="Today"] .ut-section-item').nth(0).locator('.ut-item-local-state').innerText()), 'a restored section match reapplies the valid local state');
+              await contract.evaluate(() => {
+                const records = JSON.parse(localStorage.getItem('utampa-section-actions-v1') || '{}');
+                records['feed:previous-snapshot|item:opaque-alpha'] = { feedId: 'feed:previous-snapshot', itemId: 'item:opaque-alpha', section: 'today', actionType: 'complete_local', target: '', updatedAt: new Date(Date.now() - 1000).toISOString() };
+                records['malformed-key'] = { feedId: 'feed:malformed', itemId: 'item:opaque-alpha', section: 'today', actionType: 'dismiss_local', target: '', updatedAt: new Date().toISOString() };
+                localStorage.setItem('utampa-section-actions-v1', JSON.stringify(records));
+              });
+              await contract.reload({ waitUntil: 'domcontentloaded' });
+              await waitForAppHydrated(contract);
+              assert(/\(3\)/.test(await contract.locator('.ut-source-status .ut-mobile-actions-center').innerText()), 'malformed local-state keys are rejected while a valid prior-feed record remains isolated');
+              await contract.locator('.ut-source-status .ut-mobile-actions-center').click();
+              const previousFeedRecord = contract.locator('.ut-action-record', { hasText: 'Today work item' });
+              await previousFeedRecord.locator('.ut-restore-action').click();
+              assert(/Completed locally/.test(await contract.locator('.ut-section-item[data-section-feed-id="feed:browser-contract-v1"][data-section-item-id="item:opaque-alpha"] .ut-item-local-state').innerText()), 'restoring a prior-feed record does not clear the current feed item state');
+              const feedScopedStoredActions = await contract.evaluate(() => JSON.parse(localStorage.getItem('utampa-section-actions-v1') || '{}'));
+              assert(Boolean(feedScopedStoredActions['feed:browser-contract-v1|item:opaque-alpha']) && !feedScopedStoredActions['feed:previous-snapshot|item:opaque-alpha'] && !feedScopedStoredActions['malformed-key'], 'feed-scoped restore preserves the current record and drops malformed state');
+              await contract.locator('.ut-live-drawer .drawerClose').click();
+
+              await contract.locator('.sectionTabs button', { hasText: 'Teaching' }).click();
+              await contract.waitForSelector('.ut-unavailable-view[data-page="Teaching"]');
+              assert(/SOURCE UNAVAILABLE/.test(await contract.locator('.ut-source-status[data-page="Teaching"]').innerText()), 'unavailable Teaching source is explicit');
+              assert(/approved private source is currently unavailable/i.test(await contract.locator('.ut-unavailable-view[data-page="Teaching"]').innerText()), 'unavailable Teaching reason is surfaced safely');
+              const unavailableShape = await contract.evaluate(async () => (await fetch('/api/sections/teaching')).json());
+              assert(unavailableShape.section.asOf === null && unavailableShape.section.staleAfter === null && unavailableShape.section.freshness === 'unknown' && unavailableShape.section.completeness.expectedCount === null && unavailableShape.section.completeness.receivedCount === null, 'unavailable section fixture preserves unknown versus verified-zero semantics');
+              assert(await contract.locator('.sectionTabs button', { hasText: 'Teaching' }).locator('.ut-section-count').count() === 0, 'unavailable Teaching never presents a trusted zero');
+              assert(await contract.locator('.focusCourse:visible,.phoneChat:visible').count() === 0, 'compiled Teaching sample UI remains hidden');
+
+              await contract.locator('.sectionTabs button', { hasText: 'Research' }).click();
+              await contract.waitForSelector('.ut-section-view[data-page="Research"]');
+              assert(/STALE SOURCE DATA/.test(await contract.locator('.ut-section-view[data-page="Research"]').innerText()), 'stale Research source is visibly marked stale');
+              assert(!/incomplete result/i.test(await contract.locator('.ut-section-view[data-page="Research"]').innerText()), 'complete stale Research is never mislabeled incomplete');
+              assert(/VERIFIED SOURCE · COMPLETE · STALE/.test(await contract.locator('.ut-source-status[data-page="Research"]').innerText()), 'stale Research banner preserves complete versus freshness semantics');
+              assert(await contract.locator('.sectionTabs button', { hasText: 'Research' }).locator('.ut-section-count').innerText() === '1', 'stale complete Research retains its verified count');
+              assert(await contract.locator('.pipeline:visible,.project:visible').count() === 0, 'compiled Research sample UI remains hidden');
+
+              await contract.locator('.sectionTabs button', { hasText: 'Service' }).click();
+              await contract.waitForSelector('.ut-section-view[data-page="Service"]');
+              const partialServiceText = await contract.locator('.ut-section-view[data-page="Service"]').innerText();
+              assert(/PARTIAL SOURCE DATA/.test(partialServiceText) && /No records supplied from the incomplete source/.test(partialServiceText), 'partial-zero Service is not presented as verified empty');
+              assert(!/Verified empty/.test(partialServiceText), 'partial-zero Service never claims verified zero');
+              assert(await contract.locator('.sectionTabs button', { hasText: 'Service' }).locator('.ut-section-count').innerText() === '0', 'partial Service count is explicitly qualified in its accessible tab label');
+              assert(/partial source/i.test(await contract.locator('.sectionTabs button', { hasText: 'Service' }).getAttribute('aria-label') || ''), 'partial Service zero is qualified for assistive technology');
+              assert(await contract.locator('.serviceTopGrid:visible,.founderPortal:visible,.reviewModal:visible').count() === 0, 'compiled Service sample UI remains hidden');
+
+              await contract.locator('.sectionTabs button', { hasText: 'People' }).click();
+              await contract.waitForSelector('.ut-section-view[data-page="People"]');
+              const completeZeroText = await contract.locator('.ut-section-view[data-page="People"]').innerText();
+              assert(/Verified empty/.test(completeZeroText) && /explicitly reported zero current items/.test(completeZeroText), 'complete-zero People state is explicitly verified');
+              assert(await contract.locator('.sectionTabs button', { hasText: 'People' }).locator('.ut-section-count').innerText() === '0', 'complete-zero People renders a trusted zero count');
+              assert(await contract.locator('.peopleWorkspace:visible').count() === 0, 'compiled People sample UI remains hidden');
+              const contractStates = await shot(contract, '12f-section-contract-state-matrix-mobile-390', 'authenticated-synthetic-section-state-matrix');
+              assert(contractStates.geometry.scrollWidth <= contractStates.geometry.clientWidth, 'section state matrix 390px overflow');
+              await contract.close();
+
+              const unknownZero = await newPage({ viewport: { width: 390, height: 844 } });
+              const unknownZeroFixture = connectedSectionFixtures();
+              const unknownAsOf = new Date().toISOString();
+              unknownZeroFixture.sections.people = sectionView('people', { status: 'complete', expectedCount: 0, asOf: unknownAsOf, freshness: 'unknown', staleAfter: null, items: [] });
+              await routeAuthorizedSources(unknownZero, { sections: unknownZeroFixture.sections });
+              await login(unknownZero);
+              await unknownZero.locator('.sectionTabs button', { hasText: 'People' }).click();
+              await unknownZero.waitForSelector('.ut-section-view[data-page="People"]');
+              const unknownZeroText = await unknownZero.locator('.ut-section-view[data-page="People"]').innerText();
+              assert(/Verified empty snapshot · freshness unknown/.test(unknownZeroText) && /freshness is unknown/.test(unknownZeroText), 'complete-zero with unknown freshness is not upgraded to current');
+              assert(!/zero current items/.test(unknownZeroText), 'unknown-freshness zero never claims to be current');
+              await unknownZero.close();
+
+              for (const [name, width, height] of [['12g-section-connected-mobile-320',320,568],['12h-section-connected-mobile-375',375,812],['12i-section-connected-mobile-390',390,844]]) {
+                const page = await newPage({ viewport: { width, height } });
+                const fixture = connectedSectionFixtures();
+                await routeAuthorizedSources(page, { sections: fixture.sections });
+                await login(page);
+                await page.waitForSelector('.ut-section-view[data-page="Today"] .ut-section-action');
+                const state = await shot(page, name, 'authenticated-synthetic-connected-sections');
+                assert(state.geometry.scrollWidth <= state.geometry.clientWidth, name + ' no horizontal overflow');
+                const actionTargets = await page.locator('.ut-section-view[data-page="Today"] .ut-section-action:visible').evaluateAll(nodes => nodes.map(node => ({ width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height })));
+                assert(actionTargets.length > 0 && actionTargets.every(target => target.width >= 44 && target.height >= 44), name + ' connected section actions are 44px touch targets');
+                const tabs = await page.locator('.sectionTabs button:visible').evaluateAll(nodes => nodes.map(node => ({ width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height })));
+                assert(tabs.length > 0 && tabs.every(target => target.width >= 44 && target.height >= 44), name + ' section tabs are 44px touch targets');
+                assert(await page.locator('.todayTask:visible').count() === 0, name + ' compiled sample UI remains hidden');
+                await page.close();
+              }
+
+              const sectionRecovery = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(sectionRecovery, { sectionStatus: 401 });
+              await login(sectionRecovery);
+              await sectionRecovery.waitForSelector('.ut-session-ended[data-page="Today"]');
+              const recoveryTodayText = await sectionRecovery.locator('.ut-session-ended[data-page="Today"]').innerText();
+              assert(/Sign in again/.test(recoveryTodayText) && !/Reconnect Google/.test(recoveryTodayText), 'section 401 uses dashboard sign-in recovery, not Google reauthorization');
+              await sectionRecovery.close();
+
+              const googleRecovery = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(googleRecovery, { calendarStatus: 409, driveStatus: 409 });
+              await login(googleRecovery);
+              await googleRecovery.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await googleRecovery.waitForFunction(() => document.body.innerText.includes('Reconnect Google to finish setup'));
+              assert(/Reconnect Google to finish setup/.test(await googleRecovery.locator('.ut-calendar-content').innerText()), 'Calendar 409 uses Google reauthorization recovery');
+              await googleRecovery.locator('.ut-calendar-panel .ut-mobile-prepare').click();
+              await googleRecovery.waitForFunction(() => document.querySelector('.ut-live-drawer')?.innerText.includes('Reconnect Google to finish setup'));
+              assert(/Reconnect Google to finish setup/.test(await googleRecovery.locator('.ut-live-drawer').innerText()), 'Drive 409 uses Google reauthorization recovery');
+              await googleRecovery.close();
+
+              const overlappingSections = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(overlappingSections);
+              const overlapFixture = connectedSectionFixtures();
+              let todaySectionRequests = 0;
+              await overlappingSections.route('**/api/sections/*', async route => {
+                const sectionId = new URL(route.request().url()).pathname.split('/').pop();
+                let body = overlapFixture.sections[sectionId];
+                if (sectionId === 'today') {
+                  todaySectionRequests += 1;
+                  if (todaySectionRequests === 1) {
+                    body = sectionView('today', { status: 'unavailable', expectedCount: null, items: [], reason: 'The approved private source is currently unavailable.' });
+                  } else {
+                    const older = todaySectionRequests === 2;
+                    if (older) await new Promise(resolve => setTimeout(resolve, 250));
+                    else await new Promise(resolve => setTimeout(resolve, 10));
+                    body = sectionView('today', { items: [sectionItem('today', older ? 'item:older-response' : 'item:newest-response', older ? 'Older section refresh result' : 'Newest section refresh result', { actions: [{ type: 'open_details', label: 'Open details' }] })] });
+                  }
+                }
+                await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+              });
+              await login(overlappingSections);
+              const detachedRetry = overlappingSections.locator('.ut-unavailable-view[data-page="Today"] .ut-section-retry');
+              await detachedRetry.evaluate(button => { button.click(); button.click(); });
+              await overlappingSections.waitForFunction(() => document.body.innerText.includes('Newest section refresh result'));
+              await overlappingSections.waitForTimeout(350);
+              assert(!/Older section refresh result/.test(await overlappingSections.locator('.ut-section-view[data-page="Today"]').innerText()), 'older overlapping section response cannot overwrite the newest DOM');
+              await overlappingSections.locator('.sectionTabs button', { hasText: 'Research' }).click();
+              await overlappingSections.waitForSelector('.ut-section-view[data-page="Research"]');
+              await overlappingSections.locator('.sectionTabs button', { hasText: 'Today' }).click();
+              await overlappingSections.waitForSelector('.ut-section-view[data-page="Today"]');
+              const reopenedOverlapText = await overlappingSections.locator('.ut-section-view[data-page="Today"]').innerText();
+              assert(/Newest section refresh result/.test(reopenedOverlapText) && !/Older section refresh result/.test(reopenedOverlapText), 'older overlapping section response cannot poison the section cache');
+              assert(todaySectionRequests >= 3, 'overlap evidence issued the initial request plus two forced refreshes');
+              await overlappingSections.close();
+
+              const freshnessTransition = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(freshnessTransition);
+              const freshnessFixture = connectedSectionFixtures();
+              let transitionAt = 0;
+              let freshnessAsOf = '';
+              let freshnessTodayRequests = 0;
+              await freshnessTransition.route('**/api/sections/*', route => {
+                const sectionId = new URL(route.request().url()).pathname.split('/').pop();
+                let body = freshnessFixture.sections[sectionId];
+                if (sectionId === 'today') {
+                  freshnessTodayRequests += 1;
+                  if (!transitionAt) { freshnessAsOf = new Date().toISOString(); transitionAt = Date.now() + 1500; }
+                  const isStale = Date.now() >= transitionAt;
+                  const staleAfter = new Date(transitionAt).toISOString();
+                  body = sectionView('today', { asOf: freshnessAsOf, freshness: isStale ? 'stale' : 'current', staleAfter, items: [
+                    sectionItem('today', 'item:near-expiry', 'Near-expiry verified item', { asOf: freshnessAsOf, freshness: isStale ? 'stale' : 'current', staleAfter, actions: [{ type: 'open_details', label: 'Open details' }] })
+                  ] });
+                }
+                return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+              });
+              await login(freshnessTransition);
+              assert(!/STALE SOURCE DATA/.test(await freshnessTransition.locator('.ut-section-view[data-page="Today"]').innerText()), 'near-expiry section begins current before staleAfter');
+              await freshnessTransition.waitForTimeout(Math.max(0, transitionAt - Date.now() + 200));
+              await freshnessTransition.locator('.sectionTabs button', { hasText: 'Teaching' }).click();
+              await freshnessTransition.waitForSelector('.ut-unavailable-view[data-page="Teaching"]');
+              await freshnessTransition.locator('.sectionTabs button', { hasText: 'Today' }).click();
+              await freshnessTransition.waitForSelector('.ut-section-view[data-page="Today"]');
+              const expiredSectionText = await freshnessTransition.locator('.ut-section-view[data-page="Today"]').innerText();
+              assert(/STALE SOURCE DATA/.test(expiredSectionText) && /stale source data/i.test(expiredSectionText), 'reopening after staleAfter cannot present expired section data as current');
+              assert(freshnessTodayRequests >= 2, 'staleAfter transition revalidates Today after the initial section request');
+              await freshnessTransition.close();
+
+              const delayedFreshness = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(delayedFreshness);
+              const delayedFixture = connectedSectionFixtures();
+              await delayedFreshness.route('**/api/sections/*', async route => {
+                const sectionId = new URL(route.request().url()).pathname.split('/').pop();
+                let body = delayedFixture.sections[sectionId];
+                if (sectionId === 'today') {
+                  const servedAt = new Date().toISOString();
+                  const staleAfter = new Date(Date.now() + 150).toISOString();
+                  body = sectionView('today', { servedAt, asOf: servedAt, freshness: 'current', staleAfter, items: [
+                    sectionItem('today', 'item:delayed-expiry', 'Delayed freshness response', { asOf: servedAt, freshness: 'current', staleAfter, actions: [{ type: 'open_details', label: 'Open details' }] })
+                  ] });
+                  await new Promise(resolve => setTimeout(resolve, 350));
+                }
+                await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+              });
+              await login(delayedFreshness);
+              await delayedFreshness.waitForSelector('.ut-section-view[data-page="Today"]');
+              const delayedFreshnessText = await delayedFreshness.locator('.ut-section-view[data-page="Today"]').innerText();
+              assert(/STALE SOURCE DATA/.test(delayedFreshnessText) && /stale source data/i.test(delayedFreshnessText), 'a response delivered after staleAfter is stale on first render');
+              await delayedFreshness.close();
+
+              const logoutClear = await newPage({ viewport: { width: 390, height: 844 } });
+              const logoutFixture = connectedSectionFixtures();
+              await routeAuthorizedSources(logoutClear, { sections: logoutFixture.sections });
+              await login(logoutClear);
+              await logoutClear.evaluate(() => localStorage.setItem('utampa-faculty-os-actions-v1', JSON.stringify({ 'legacy startup record': { status: 'completed' } })));
+              await logoutClear.reload({ waitUntil: 'domcontentloaded' });
+              await waitForAppHydrated(logoutClear);
+              assert(await logoutClear.evaluate(() => localStorage.getItem('utampa-faculty-os-actions-v1')) === null, 'startup purges the retired title-keyed legacy action store');
+              await logoutClear.evaluate(() => {
+                localStorage.setItem('utampa-section-actions-v1', JSON.stringify({ 'feed:browser-contract-v1|item:opaque-alpha': { feedId: 'feed:browser-contract-v1', itemId: 'item:opaque-alpha', section: 'today', actionType: 'complete_local', target: '', updatedAt: new Date().toISOString() } }));
+                localStorage.setItem('utampa-faculty-os-actions-v1', JSON.stringify({ 'legacy synthetic task': { status: 'completed', target: '', updatedAt: new Date().toISOString() } }));
+              });
+              await logoutClear.locator('.profile').click();
+              await logoutClear.waitForSelector('.ut-live-drawer form[action="/logout"]');
+              await Promise.all([
+                logoutClear.waitForURL(base + '/login'),
+                logoutClear.locator('.ut-live-drawer form[action="/logout"] button').click()
+              ]);
+              const logoutStores = await logoutClear.evaluate(() => ({ section: localStorage.getItem('utampa-section-actions-v1'), legacy: localStorage.getItem('utampa-faculty-os-actions-v1') }));
+              assert(logoutStores.section === null && logoutStores.legacy === null, 'logout clears both opaque section actions and legacy prototype action storage');
+              await logoutClear.close();
+
+              const noData = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(noData, { events: [], files: [] });
+              await login(noData);
+              await noData.waitForSelector('.ut-unavailable-view[data-page="Today"]');
+              let calendarClickRequests = 0;
+              noData.on('request', request => { if (new URL(request.url()).pathname === '/api/calendar') calendarClickRequests += 1; });
+              await noData.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await noData.waitForFunction(() => document.body.innerText.includes('No events found'));
+              assert(calendarClickRequests === 1, 'Calendar tab click issues exactly one Calendar request');
+              const noDataState = await shot(noData, '13-calendar-authorized-empty-state', 'authenticated-authorized-empty');
+              const noDataText = await noData.locator('body').innerText();
+              noDataState.emptyStateVisible = noDataText.includes('No events found') && noDataText.includes('selected Google calendars');
+              assert(noDataState.emptyStateVisible, 'authorized Calendar empty source explained');
+              await noData.close();
+
+              const staleGuard = await newPage({ viewport: { width: 390, height: 844 } });
+              let calendarPhase = 'header';
+              let calendarPhaseRequest = 0;
+              await staleGuard.route('**/api/calendar', async route => {
+                calendarPhaseRequest += 1;
+                const requestInPhase = calendarPhaseRequest;
+                const future = hours => new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+                let title = 'Header event';
+                let delay = 0;
+                if (calendarPhase === 'panel-initial') title = 'Initial panel result';
+                if (calendarPhase === 'panel-refresh') {
+                  title = requestInPhase === 1 ? 'Older panel refresh result' : 'Newest panel refresh result';
+                  delay = requestInPhase === 1 ? 250 : 10;
+                }
+                if (calendarPhase === 'search') title = requestInPhase === 1 ? 'Old search calendar title' : 'New search calendar title';
+                if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+                await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ events: [{ id: calendarPhase + '-' + requestInPhase, title, start: future(2), end: future(3), calendar: 'Authorized test feed', allDay: false }], source: 'Google Calendar · read-only out-of-order fixture', partial: false, truncated: false, warnings: [] }) });
+              });
+              await staleGuard.route('**/api/drive**', async route => {
+                const query = new URL(route.request().url()).searchParams.get('q') || '';
+                const old = /^Old/i.test(query);
+                if (old) await new Promise(resolve => setTimeout(resolve, 250));
+                await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ files: [{ id: old ? 'old-file' : 'new-file', name: old ? 'Old stale filename' : 'New current filename', mimeType: 'text/plain', modifiedTime: new Date().toISOString() }], source: 'Google Drive metadata · read-only out-of-order fixture', truncated: false }) });
+              });
+              await login(staleGuard);
+              await staleGuard.waitForSelector('.ut-live-countdown[data-state="ready"]');
+
+              calendarPhase = 'panel-initial'; calendarPhaseRequest = 0;
+              await staleGuard.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await staleGuard.waitForFunction(() => document.body.innerText.includes('Initial panel result'));
+              calendarPhase = 'panel-refresh'; calendarPhaseRequest = 0;
+              await staleGuard.locator('.ut-calendar-panel .ut-refresh').click();
+              await staleGuard.locator('.ut-calendar-panel .ut-refresh').click();
+              await staleGuard.waitForFunction(() => document.body.innerText.includes('Newest panel refresh result'));
+              await staleGuard.waitForTimeout(300);
+              assert(!/Older panel refresh result/.test(await staleGuard.locator('.ut-calendar-content').innerText()), 'older Calendar refresh cannot overwrite the newest result');
+
+              await staleGuard.locator('.ut-calendar-panel .ut-mobile-search').click();
+              calendarPhase = 'search'; calendarPhaseRequest = 0;
+              await staleGuard.locator('#ut-search-input').fill('Old');
+              await staleGuard.locator('.ut-search-form button').click();
+              await staleGuard.locator('#ut-search-input').fill('New');
+              await staleGuard.locator('.ut-search-form button').click();
+              await staleGuard.waitForFunction(() => document.body.innerText.includes('New current filename'));
+              await staleGuard.waitForTimeout(300);
+              const newestSearchText = await staleGuard.locator('.ut-search-results').innerText();
+              assert(/New current filename/.test(newestSearchText) && !/Old stale filename/.test(newestSearchText), 'older Search response cannot overwrite the newest result');
+              await staleGuard.close();
+
+              const partial = await newPage({ viewport: { width: 375, height: 812 } });
+              await routeAuthorizedSources(partial, { events: [], files: [], partial: true });
+              await login(partial);
+              await partial.waitForSelector('.ut-unavailable-view[data-page="Today"]');
+              await partial.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await partial.waitForFunction(() => document.body.innerText.includes('No complete result available'));
+              const partialState = await shot(partial, '13b-calendar-partial-source-state', 'authenticated-partial-calendar');
+              partialState.partialStateVisible = /PARTIAL CALENDAR DATA/.test(await partial.locator('.ut-calendar-content').innerText());
+              assert(partialState.partialStateVisible, 'Calendar never presents partial failure as clean empty state');
+              assert(partialState.geometry.scrollWidth <= partialState.geometry.clientWidth, 'partial Calendar mobile overflow');
+              await partial.close();
+
+              const truncated = await newPage({ viewport: { width: 320, height: 568 } });
+              await routeAuthorizedSources(truncated, { events: [], files: [], truncated: true });
+              await login(truncated);
+              await truncated.waitForSelector('.ut-live-countdown[data-state="partial"]');
+              await truncated.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await truncated.waitForFunction(() => document.body.innerText.includes('No complete result available'));
+              const truncatedState = await shot(truncated, '13c-calendar-truncated-only-state', 'authenticated-truncated-calendar');
+              assert(!/No events found/.test(await truncated.locator('.ut-calendar-content').innerText()), 'truncated-only Calendar state is not clean empty');
+              assert(truncatedState.geometry.scrollWidth <= truncatedState.geometry.clientWidth, 'truncated Calendar 320px overflow');
+              await truncated.close();
+
+              const reconnect = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(reconnect, { calendarStatus: 409, driveStatus: 409 });
+              await login(reconnect);
+              await reconnect.waitForSelector('.ut-live-countdown[data-state="reauthorize"]');
+              await reconnect.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await reconnect.waitForFunction(() => document.body.innerText.includes('Reconnect Google to finish setup'));
+              assert(!/No events found/.test(await reconnect.locator('.ut-calendar-content').innerText()), 'Calendar reauthorization is not rendered as empty Calendar data');
+              await reconnect.close();
+
+              const expiredApiSession = await newPage({ viewport: { width: 390, height: 844 } });
+              const expiryScrubFixture = connectedSectionFixtures();
+              await routeAuthorizedSources(expiredApiSession, { sections: expiryScrubFixture.sections, driveStatus: 401 });
+              let calendarSessionExpired = false;
+              await expiredApiSession.route('**/api/calendar', route => {
+                if (calendarSessionExpired) return route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: 'authentication_required' }) });
+                const start = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+                const end = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
+                return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ events: [{ id: 'pre-expiry-event', title: 'Pre-expiry Calendar item', start, end, calendar: 'Authorized test feed', allDay: false }], source: 'Google Calendar · read-only pre-expiry fixture', partial: false, truncated: false, warnings: [] }) });
+              });
+              await login(expiredApiSession);
+              await expiredApiSession.waitForFunction(title => document.body.innerText.includes(title), expiryScrubFixture.literalTitle);
+              await expiredApiSession.evaluate(() => {
+                localStorage.setItem('utampa-section-actions-v1', JSON.stringify({ 'feed:browser-contract-v1|item:opaque-alpha': { feedId: 'feed:browser-contract-v1', itemId: 'item:opaque-alpha', section: 'today', actionType: 'complete_local', target: '', updatedAt: new Date().toISOString() } }));
+                localStorage.setItem('utampa-faculty-os-actions-v1', JSON.stringify({ legacy: { status: 'completed', target: '', updatedAt: new Date().toISOString() } }));
+              });
+              assert(await expiredApiSession.locator('.sectionTabs button', { hasText: 'Today' }).locator('.ut-section-count').innerText() === '2', 'pre-expiry connected Today count is visibly rendered');
+              calendarSessionExpired = true;
+              await expiredApiSession.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await expiredApiSession.waitForSelector('.ut-session-ended');
+              const expiredSessionText = await expiredApiSession.locator('.ut-session-ended').innerText();
+              const expiredBodyText = await expiredApiSession.locator('body').innerText();
+              assert(/Sign in again/.test(expiredSessionText) && !/Reconnect Google/.test(expiredSessionText), 'Calendar API 401 enters global dashboard sign-in recovery');
+              assert(!expiredBodyText.includes(expiryScrubFixture.literalTitle) && !expiredBodyText.includes('Pre-expiry Calendar item'), 'Calendar API 401 scrubs previously visible connected section and Calendar data');
+              assert(await expiredApiSession.locator('.ut-section-item,.ut-calendar-panel').count() === 0, 'session expiry removes connected item and Calendar DOM');
+              assert(await expiredApiSession.locator('.sectionTabs .ut-section-count').count() === 0 && await expiredApiSession.locator('.sectionTabs button', { hasText: 'Today' }).getAttribute('aria-label') === 'Today', 'session expiry removes trusted section counts and their accessible claims');
+              const expiredStores = await expiredApiSession.evaluate(() => ({ section: localStorage.getItem('utampa-section-actions-v1'), legacy: localStorage.getItem('utampa-faculty-os-actions-v1') }));
+              assert(expiredStores.section === null && expiredStores.legacy === null, 'session expiry clears opaque local section and legacy action state');
+              await expiredApiSession.close();
+
+              const unavailable = await newPage({ viewport: { width: 844, height: 390 } });
+              await routeAuthorizedSources(unavailable, { calendarStatus: 502, driveStatus: 502 });
+              await login(unavailable);
+              await unavailable.waitForSelector('.ut-live-countdown[data-state="error"]');
+              await unavailable.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await unavailable.waitForFunction(() => document.body.innerText.includes('Calendar is temporarily unavailable'));
+              assert(!/No events found/.test(await unavailable.locator('.ut-calendar-content').innerText()), 'Calendar failure is not rendered as empty data');
+              assert(await unavailable.locator('.ut-calendar-content [role="alert"]').getAttribute('aria-atomic') === 'true', 'Calendar source failure is announced atomically');
+              await unavailable.close();
+
+              const driveReconnect = await newPage({ viewport: { width: 1440, height: 900 } });
+              await routeAuthorizedSources(driveReconnect, { driveStatus: 409 });
+              await login(driveReconnect);
+              await driveReconnect.waitForSelector('.ut-live-countdown[data-state="ready"]');
+              await driveReconnect.locator('.prepareHeader').click();
+              await driveReconnect.waitForFunction(() => document.body.innerText.includes('Reconnect Google to finish setup'));
+              assert(/Reconnect Google to finish setup/.test(await driveReconnect.locator('.ut-live-drawer').innerText()), 'Drive reauthorization is explicit in Prepare Me');
+              await driveReconnect.close();
+
+              const driveUnavailable = await newPage({ viewport: { width: 1440, height: 900 } });
+              await routeAuthorizedSources(driveUnavailable, { driveStatus: 502 });
+              await login(driveUnavailable);
+              await driveUnavailable.waitForSelector('.ut-live-countdown[data-state="ready"]');
+              await driveUnavailable.locator('.prepareHeader').click();
+              await driveUnavailable.waitForFunction(() => document.body.innerText.includes('Prepare Me is temporarily unavailable'));
+              assert(/Nothing was changed/.test(await driveUnavailable.locator('.ut-live-drawer').innerText()), 'Drive failure leaves explicit unchanged state');
+              assert(await driveUnavailable.locator('.ut-live-drawer [role="alert"]').getAttribute('aria-live') === 'assertive', 'Prepare Me failure is announced assertively');
+              await driveUnavailable.close();
+
+              const driveTruncatedEmpty = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(driveTruncatedEmpty, { files: [], driveTruncated: true });
+              await login(driveTruncatedEmpty);
+              await driveTruncatedEmpty.waitForSelector('.ut-live-countdown[data-state="ready"]');
+              await driveTruncatedEmpty.waitForSelector('.ut-source-status .ut-mobile-prepare');
+              await driveTruncatedEmpty.locator('.ut-source-status .ut-mobile-prepare').click();
+              await driveTruncatedEmpty.waitForFunction(() => document.body.innerText.includes('No complete Drive filename result'));
+              const driveTruncatedText = await driveTruncatedEmpty.locator('.ut-live-drawer').innerText();
+              assert(/PARTIAL DRIVE RESULTS/.test(driveTruncatedText), 'empty first Drive page discloses truncation');
+              assert(!/No matching Drive filenames were found/.test(driveTruncatedText), 'truncated empty first Drive page is never presented as verified empty');
+              await driveTruncatedEmpty.close();
+
+              const verifiedZero = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(verifiedZero);
+              await login(verifiedZero);
+              await verifiedZero.waitForSelector('.ut-unavailable-view[data-page="Today"]');
+              await verifiedZero.locator('.sectionTabs button', { hasText: 'People' }).click();
+              await verifiedZero.waitForSelector('.ut-unavailable-view[data-page="People"]');
+              await verifiedZero.waitForFunction(() => document.body.innerText.includes('People data is unavailable'));
+              const zeroState = await shot(verifiedZero, '14-people-protected-boundary-empty', 'authenticated-protected-boundary');
+              const zeroText = await verifiedZero.locator('body').innerText();
+              zeroState.peopleBoundaryVisible = zeroText.includes('DIRECTORY SOURCE NOT CONNECTED') && zeroText.includes('People data is unavailable');
+              assert(zeroState.peopleBoundaryVisible, 'People boundary and provenance state');
+              const searchOpener = verifiedZero.locator('.ut-source-status .ut-mobile-search');
+              await searchOpener.click();
+              assert(await verifiedZero.locator('.ut-live-drawer').getAttribute('role') === 'dialog', 'live drawer has dialog semantics');
+              assert(await verifiedZero.locator('.ut-live-drawer').getAttribute('aria-modal') === 'true', 'live drawer is modal');
+              await verifiedZero.locator('#ut-search-input').fill('ENT 330');
+              await verifiedZero.locator('.ut-search-form button').click();
+              await verifiedZero.waitForSelector('.ut-search-results .ut-event');
+              assert(/ENT 330 · Venture Validation/.test(await verifiedZero.locator('.ut-search-results').innerText()), 'Search returns authorized Calendar result');
+              await verifiedZero.keyboard.press('Escape');
+              await verifiedZero.waitForSelector('.ut-live-shade', { state: 'detached' });
+              assert(await searchOpener.evaluate(node => document.activeElement === node), 'Escape closes live drawer and restores opener focus');
+              await verifiedZero.close();
+
+              evidence.diagnostics = diagnostics;
+              assert(diagnostics.length === 0, 'no console, page, or failed-request diagnostics: ' + diagnostics.join(' | '));
+              evidence.verdict = evidence.failures.length ? 'FAIL' : 'PASS';
+              fs.writeFileSync('evidence/evidence.json', JSON.stringify(evidence, null, 2));
+              if (evidence.failures.length) process.exitCode = 1;
+            } finally { await browser.close(); }
+          })().catch(error => { evidence.verdict = 'ERROR'; evidence.fatal = String(error.stack || error); evidence.diagnostics = diagnostics; fs.writeFileSync('evidence/evidence.json', JSON.stringify(evidence, null, 2)); console.error(error); process.exit(1); });
+          NODE
+          node evidence.cjs
+
+      - name: Finalize ready evidence
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const evidence = JSON.parse(fs.readFileSync('evidence/evidence.json', 'utf8'));
+          if (evidence.exactHead !== process.env.RC_SHA) throw new Error('evidence exact head mismatch');
+          if (evidence.verdict !== 'PASS') throw new Error('evidence verdict is not PASS');
+          if (!Array.isArray(evidence.failures) || evidence.failures.length) throw new Error('evidence contains failures');
+          if (!Array.isArray(evidence.diagnostics) || evidence.diagnostics.length) throw new Error('evidence contains diagnostics');
+          if (!Array.isArray(evidence.screenshots) || !evidence.screenshots.length) throw new Error('evidence has no screenshots');
+          if (!evidence.runtime || !evidence.runtime.node || evidence.runtime.playwright !== '1.55.0' || !evidence.runtime.browser) throw new Error('evidence runtime versions are missing or unexpected');
+          for (const file of evidence.screenshots) {
+            if (!fs.existsSync('evidence/' + file)) throw new Error('missing screenshot: ' + file);
+          }
+          NODE
+          cp utampa.log evidence/utampa.log 2>/dev/null || true
+          {
+            echo "UTAMPA_EXACT_BROWSER_EVIDENCE_READY"
+            echo "EXACT_HEAD=$RC_SHA"
+            echo "RUN_URL=https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "IDENTITY=injected synthetic Google OIDC for a non-production test identity; no real account or token"
+            echo "DATA=fail-closed and browser-routed synthetic section-contract states plus synthetic Calendar/Drive metadata fixtures; no external private/protected source or real account was queried"
+          } > evidence/MANIFEST.txt
+          node <<'NODE' >> evidence/MANIFEST.txt
+          const evidence = require('./evidence/evidence.json');
+          console.log('RUNTIME_NODE=' + evidence.runtime.node);
+          console.log('RUNTIME_PLAYWRIGHT=' + evidence.runtime.playwright);
+          console.log('RUNTIME_BROWSER=' + evidence.runtime.browser);
+          NODE
+          find evidence -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > evidence/SHA256SUMS.txt
+
+      - name: Upload exact ready evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: utampa-exact-browser-evidence-${{ env.RC_SHA }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Finalize failed diagnostics
+        if: failure() || cancelled()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cp utampa.log evidence/utampa.log 2>/dev/null || true
+          {
+            echo "UTAMPA_EXACT_BROWSER_EVIDENCE_NOT_READY"
+            echo "EXACT_HEAD=$RC_SHA"
+            echo "RUN_URL=https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > evidence/MANIFEST.txt
+          find evidence -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > evidence/SHA256SUMS.txt
+
+      - name: Upload failed browser diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: utampa-browser-diagnostics-${{ env.RC_SHA }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
