@@ -84,8 +84,8 @@ jobs:
           }
           async function waitForAppHydrated(page) {
             await page.waitForFunction(() => {
-              const task = document.querySelector('.todayTask');
-              return task && Object.keys(task).some(key => key.startsWith('__reactProps$'));
+              const root = window.__VINEXT_RSC_ROOT__ && window.__VINEXT_RSC_ROOT__._internalRoot;
+              return Boolean(root && root.current && root.current.memoizedState && root.current.memoizedState.isDehydrated === false);
             });
           }
           async function login(page, next = '/') {
