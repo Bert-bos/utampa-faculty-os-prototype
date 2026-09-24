@@ -83,7 +83,10 @@ jobs:
             return { reached: false };
           }
           async function waitForAppHydrated(page) {
-            await page.waitForFunction(() => Object.keys(document).some(key => key.startsWith('_reactListening')));
+            await page.waitForFunction(() => {
+              const task = document.querySelector('.todayTask');
+              return task && Object.keys(task).some(key => key.startsWith('__reactProps$'));
+            });
           }
           async function login(page, next = '/') {
             await page.goto(base + '/login?next=' + encodeURIComponent(next), { waitUntil: 'domcontentloaded' });
