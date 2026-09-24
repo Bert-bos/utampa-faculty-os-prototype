@@ -369,6 +369,14 @@
   }
 
   /* --- open / close ------------------------------------------------------ */
+  function ensurePanelConnected() {
+    /* React hydration can reconcile body children after this standalone
+       component initializes. The trigger is rewired by the observer, but the
+       retained panel reference may then point at a detached node. Reattach it
+       only when the user opens the controls, after hydration has settled. */
+    if (!panel.isConnected) document.body.appendChild(panel);
+  }
+
   function inertBackground() {
     inerted = [];
     Array.prototype.forEach.call(document.body.children, function (node) {
@@ -384,6 +392,7 @@
   }
 
   function open() {
+    ensurePanelConnected();
     if (!panel.hidden) { keepFocusInPanel(); return; }
     prevFocus = document.activeElement;
     fillDestinations();
