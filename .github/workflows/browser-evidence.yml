@@ -84,8 +84,14 @@ jobs:
           }
           async function waitForAppHydrated(page) {
             await page.waitForFunction(() => {
-              const root = window.__VINEXT_RSC_ROOT__ && window.__VINEXT_RSC_ROOT__._internalRoot;
-              return Boolean(root && root.current && root.current.memoizedState && root.current.memoizedState.isDehydrated === false);
+              const teaching = Array.from(document.querySelectorAll('.sectionTabs button')).find(button => /Teaching/.test(button.textContent || ''));
+              if (!document.querySelector('.focusCourse')) teaching?.click();
+              return Boolean(document.querySelector('.focusCourse'));
+            });
+            await page.waitForFunction(() => {
+              const today = Array.from(document.querySelectorAll('.sectionTabs button')).find(button => /Today/.test(button.textContent || ''));
+              if (!document.querySelector('.todayDirective')) today?.click();
+              return Boolean(document.querySelector('.todayDirective'));
             });
           }
           async function login(page, next = '/') {
