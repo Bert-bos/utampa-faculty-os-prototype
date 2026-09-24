@@ -391,8 +391,12 @@
     inertBackground();
     panel.hidden = false;
     panel.setAttribute("aria-hidden", "false");
-    /* next frame so the transition runs */
-    requestAnimationFrame(function () { panel.classList.add("is-open"); });
+    /* Flush the visible base state so the transition can run synchronously. */
+    // Make the open state observable in the same interaction turn. A deferred
+    // animation frame can be throttled in background/headless tabs and leave
+    // the controls hidden indefinitely even though the click was handled.
+    void panel.offsetWidth;
+    panel.classList.add("is-open");
     elStart.focus();
   }
 
