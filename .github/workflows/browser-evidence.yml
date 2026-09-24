@@ -2,17 +2,6 @@ name: UTampa exact-head browser evidence
 
 on:
   pull_request:
-    paths:
-      - '.github/workflows/browser-evidence.yml'
-      - 'server.js'
-      - 'test/server.test.js'
-      - 'cc-workspace-switcher.v2.js'
-      - 'cc-incubator-adapter.v1.js'
-      - 'utampa-live.v1.js'
-      - 'utampa-live.v1.css'
-      - 'index.html'
-      - 'assets/**'
-      - 'data/**'
   workflow_dispatch:
 
 permissions:
@@ -20,8 +9,8 @@ permissions:
 
 jobs:
   browser-evidence:
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     env:
       RC_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       NODE_ENV: test
@@ -29,7 +18,7 @@ jobs:
       GOOGLE_CLIENT_ID: synthetic-client-id.apps.googleusercontent.com
       GOOGLE_CLIENT_SECRET: synthetic-evidence-client-secret
       GOOGLE_REDIRECT_URI: http://127.0.0.1:4175/auth/google/callback
-      UTAMPA_ALLOWED_EMAIL: bert@utampa.edu
+      UTAMPA_ALLOWED_EMAIL: bert@bertseither.com
       UTAMPA_SESSION_SECRET: synthetic-evidence-session-secret-32-chars
       UTAMPA_SYNTHETIC_OIDC: '1'
     steps:
@@ -37,6 +26,12 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Use Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
 
       - name: Verify exact checkout and tests
         shell: bash
@@ -57,16 +52,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          CHROME_BIN="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true)"
-          test -n "$CHROME_BIN"
-          export CHROME_BIN
-          npm install --no-save --ignore-scripts playwright-core@1.55.0
+          npm install --no-save --ignore-scripts playwright@1.55.0
+          npx playwright install --with-deps chromium
           mkdir -p evidence
           cat > evidence.cjs <<'NODE'
           const fs = require('fs');
-          const { chromium } = require('playwright-core');
+          const { chromium } = require('playwright');
           const base = 'http://127.0.0.1:4175';
-          const evidence = { exactHead: process.env.RC_SHA, identity: 'injected synthetic Google OIDC; no real account or token', data: 'browser-routed sanitized Calendar/Drive metadata fixtures only; no real/private/FERPA/student/founder data', screenshots: [], checks: {}, failures: [] };
+          const evidence = { exactHead: process.env.RC_SHA, identity: 'injected synthetic Google OIDC for bert@bertseither.com; no real account or token', data: 'committed prototype interface plus browser-routed synthetic Calendar/Drive metadata fixtures; no external private/protected source or real account was queried', screenshots: [], checks: {}, failures: [] };
           const assert = (ok, message) => { if (!ok) evidence.failures.push(message); };
           async function shot(page, name, authState) {
             await page.screenshot({ path: 'evidence/' + name + '.png', fullPage: true });
@@ -95,23 +88,47 @@ jobs:
             await page.waitForSelector('[data-cc-workspace="bos"][aria-disabled="true"]');
             await page.waitForTimeout(250);
             assert(await page.locator('input[type=password]').count() === 0, 'no local password field');
+            const me = await page.evaluate(async () => { const response = await fetch('/api/me'); return { status: response.status, body: await response.json() }; });
+            assert(me.status === 200 && me.body.email === 'bert@bertseither.com', 'authenticated identity is the owner-approved personal Google account');
           }
           async function routeAuthorizedSources(page, options = {}) {
-            const events = options.events === undefined ? [{ id: 'event-1', title: 'ENT 330 · Venture Validation', start: '2026-09-23T16:00:00Z', end: '2026-09-23T17:00:00Z', location: 'Sykes 134', url: 'https://calendar.google.com/calendar/event?eid=synthetic', allDay: false }] : options.events;
+            const future = hours => new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+            const events = options.events === undefined ? [{ id: 'event-1', title: 'ENT 330 · Venture Validation', start: future(2), end: future(3), location: 'Sykes 134', calendar: 'Personal test calendar', url: 'https://calendar.google.com/calendar/event?eid=synthetic', allDay: false }] : options.events;
             const files = options.files === undefined ? [{ id: 'file-1', name: 'ENT 330 Venture Validation Deck', mimeType: 'application/vnd.google-apps.presentation', modifiedTime: '2026-09-22T15:00:00Z', url: 'https://drive.google.com/open?id=synthetic' }] : options.files;
-            await page.route('**/api/calendar', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ events, source: 'Google Calendar (read-only test fixture)' }) }));
-            await page.route('**/api/drive**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ files, source: 'Google Drive metadata (read-only test fixture)' }) }));
+            const calendarStatus = options.calendarStatus || 200;
+            const calendarBody = calendarStatus === 409 ? { error: 'reauthorization_required' } : calendarStatus >= 400 ? { error: 'calendar_unavailable' } : { events, source: 'Google Calendar · read-only test fixture', partial: Boolean(options.partial), truncated: Boolean(options.truncated), warnings: options.partial ? [{ code: 'calendar_unavailable', calendar: 'Synthetic unavailable source' }] : [] };
+            const driveStatus = options.driveStatus || 200;
+            const driveBody = driveStatus === 409 ? { error: 'reauthorization_required' } : driveStatus >= 400 ? { error: 'drive_unavailable' } : { files, source: 'Google Drive metadata (read-only test fixture)', truncated: Boolean(options.driveTruncated) };
+            await page.route('**/api/calendar', route => route.fulfill({ status: calendarStatus, contentType: 'application/json', body: JSON.stringify(calendarBody) }));
+            await page.route('**/api/drive**', route => route.fulfill({ status: driveStatus, contentType: 'application/json', body: JSON.stringify(driveBody) }));
           }
           (async () => {
-            const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_BIN, args: ['--no-sandbox'] });
+            const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+            evidence.runtime = { node: process.version, playwright: require('playwright/package.json').version, browser: await browser.version() };
+            const diagnostics = [];
+            async function newPage(options) {
+              const page = await browser.newPage(options);
+              page.on('pageerror', error => diagnostics.push('pageerror: ' + String(error)));
+              page.on('console', message => { if (message.type() === 'error' && !/^Failed to load resource: the server responded with a status of \d+/.test(message.text())) diagnostics.push('console: ' + message.text()); });
+              page.on('requestfailed', request => { if (!/ERR_ABORTED/.test(request.failure()?.errorText || '')) diagnostics.push('requestfailed: ' + request.url() + ' · ' + (request.failure()?.errorText || 'unknown')); });
+              page.on('response', response => {
+                const target = new URL(response.url());
+                if (target.origin !== base || response.status() < 400) return;
+                if (target.pathname === '/boss/' || target.pathname === '/api/calendar' || target.pathname === '/api/drive') return;
+                diagnostics.push('http ' + response.status() + ': ' + response.url());
+              });
+              return page;
+            }
             try {
-              for (const [name, width, height] of [['01-login-desktop-1440',1440,1000],['02-login-mobile-390',390,844],['03-login-mobile-375',375,812]]) {
-                const page = await browser.newPage({ viewport: { width, height } });
+              for (const [name, width, height] of [['01-login-desktop-1440',1440,1000],['02-login-mobile-390',390,844],['03-login-mobile-375',375,812],['03b-login-mobile-320',320,568]]) {
+                const page = await newPage({ viewport: { width, height } });
                 await page.goto(base + '/login', { waitUntil: 'domcontentloaded' });
                 const state = await shot(page, name, 'unauthenticated-entry');
                 assert(/continue with google/i.test(state.text), name + ' Google identity entry');
                 assert(/^My Work Login/m.test(state.text), name + ' neutral login label');
                 assert(!/University of Tampa|Faculty OS/i.test(state.text), name + ' no University branding');
+                assert(/read-only Calendar event metadata and Drive filename metadata visible to this personal Google account/i.test(state.text), name + ' pre-consent personal metadata disclosure');
+                assert(/University accounts, Canvas, Workday, student records, and institutional systems are not connected/i.test(state.text), name + ' pre-consent institutional boundary');
                 assert(state.geometry.scrollWidth <= state.geometry.clientWidth, name + ' overflow');
                 const buttonHeight = await page.locator('[data-testid=google-sign-in]').evaluate(node => node.getBoundingClientRect().height);
                 assert(buttonHeight >= 44, name + ' touch target');
@@ -130,7 +147,7 @@ jobs:
                 await page.close();
               }
 
-              const error = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              const error = await newPage({ viewport: { width: 390, height: 844 } });
               await error.goto(base + '/login?error=sign-in');
               await error.waitForSelector('[role=alert]');
               const errorState = await shot(error, '04-oauth-error-mobile-390', 'oauth-error-local-only');
@@ -142,19 +159,20 @@ jobs:
               assert(errorState.geometry.scrollWidth <= errorState.geometry.clientWidth, 'error overflow');
               await error.close();
 
-              const denied = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              const denied = await newPage({ viewport: { width: 390, height: 844 } });
               await denied.goto(base + '/service/spartan-incubator', { waitUntil: 'domcontentloaded' });
               const deniedState = await shot(denied, '05-unauthenticated-deep-link-denied', 'unauthenticated-denied');
               assert(/\/login\?next=/.test(deniedState.url), 'unauthenticated deep link redirected');
               assert(!/Spartan Incubator Service/i.test(deniedState.text), 'private dashboard not disclosed');
               await denied.close();
 
-              for (const [name, width, height] of [['06-dashboard-desktop-1440',1440,1000],['07-dashboard-mobile-390',390,844],['08-dashboard-mobile-375',375,812]]) {
-                const page = await browser.newPage({ viewport: { width, height } });
+              for (const [name, width, height] of [['06-dashboard-desktop-1440',1440,1000],['07-dashboard-mobile-390',390,844],['08-dashboard-mobile-375',375,812],['08b-dashboard-mobile-320',320,568],['08c-dashboard-landscape-844',844,390]]) {
+                const page = await newPage({ viewport: { width, height } });
                 await routeAuthorizedSources(page);
                 await login(page);
                 await page.waitForSelector('.todayDirective');
                 await page.waitForSelector('.ut-source-status[data-page="Today"]');
+                await page.waitForSelector('.ut-live-countdown[data-state="ready"]');
                 const state = await shot(page, name, 'authenticated-synthetic-oidc');
                 assert(state.geometry.scrollWidth <= state.geometry.clientWidth, name + ' overflow');
                 const bos = page.locator('[data-cc-workspace="bos"]');
@@ -171,17 +189,62 @@ jobs:
                 state.nativeWorkspace = /Prepare class, unblock the Incubator, then move research forward/.test(bodyText) && /PROTOTYPE DECISION WORKSPACE/.test(bodyText);
                 assert(state.nativeWorkspace, name + ' native Today workspace and provenance');
                 assert(await page.locator('.ut-live-view').count() === 0, name + ' generic Calendar/Drive replacement absent');
+                assert(/ENT 330 · Venture Validation/.test(await page.locator('.ut-live-countdown').getAttribute('aria-label') || ''), name + ' live next-event countdown');
+                assert(!/MINUTES TO NEXT/.test(bodyText), name + ' fabricated static countdown hidden');
                 await page.close();
               }
 
-              const failSafe = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              const recorder = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(recorder);
+              await login(recorder);
+              await recorder.waitForSelector('.ut-live-countdown[data-state="ready"]');
+              assert(await recorder.locator('.globalRecord').getAttribute('aria-label') === 'Open recording controls preview', 'recording trigger has truthful accessible name');
+              await recorder.locator('.globalRecord').click();
+              await recorder.waitForSelector('#cc-recorder.is-open');
+              await recorder.evaluate(() => window.__ccRecorder.open());
+              assert(/no audio is captured/i.test(await recorder.locator('#cc-recorder').innerText()), 'global Record Meeting is intercepted by truthful prototype recorder');
+              const recorderTargets = await recorder.locator('#cc-recorder').evaluate(node => ['.cc-rec__close', '#cc-rec-start', '#cc-rec-dest', '#cc-rec-confirm'].map(selector => {
+                const box = node.querySelector(selector).getBoundingClientRect();
+                return { selector, width: box.width, height: box.height };
+              }));
+              assert(recorderTargets.every(target => target.width >= 44 && target.height >= 44), 'recorder controls are touch sized on mobile');
+              assert(await recorder.locator('#cc-rec-save').isDisabled(), 'recorder Finish preview starts disabled');
+              await recorder.locator('#cc-rec-confirm').click();
+              assert(/Simulated destination .* confirmed for this preview/.test(await recorder.locator('#cc-rec-destnote').innerText()), 'recorder confirmation stays explicitly simulated');
+              assert(await recorder.locator('#cc-rec-save').isDisabled(), 'destination confirmation alone cannot finish preview');
+              await recorder.locator('#cc-rec-start').click();
+              await recorder.waitForTimeout(1100);
+              assert(await recorder.locator('#cc-recorder').getAttribute('data-cc-state') === 'recording', 'recorder timer-running state');
+              assert(!/^00:00$/.test(await recorder.locator('#cc-rec-time').innerText()), 'recorder timer visibly advances');
+              await recorder.locator('#cc-rec-pause').click();
+              assert(await recorder.locator('#cc-recorder').getAttribute('data-cc-state') === 'paused', 'recorder timer-paused state');
+              await recorder.locator('#cc-rec-pause').click();
+              await recorder.locator('#cc-rec-stop').click();
+              assert(await recorder.locator('#cc-recorder').getAttribute('data-cc-state') === 'stopped', 'recorder timer-stopped state');
+              assert(/Ready to finish this preview/.test(await recorder.locator('#cc-rec-hint').innerText()), 'recorder final action remains a preview');
+              await recorder.locator('#cc-rec-save').click();
+              assert(await recorder.locator('#cc-recorder').getAttribute('data-cc-state') === 'saved', 'recorder prototype-complete state');
+              assert(/Nothing was captured, filed or uploaded/.test(await recorder.locator('#cc-rec-done').innerText()), 'recorder completion makes no capture or filing claim');
+              assert(await recorder.locator('.topApp').evaluate(node => node.inert), 'recorder makes background inert');
+              await recorder.keyboard.press('Tab');
+              assert(await recorder.locator('#cc-recorder').evaluate(node => node.contains(document.activeElement)), 'recorder traps forward focus after completion');
+              await recorder.keyboard.press('Shift+Tab');
+              assert(await recorder.locator('#cc-recorder').evaluate(node => node.contains(document.activeElement)), 'recorder traps reverse focus after completion');
+              await recorder.locator('[data-cc-close]').last().click();
+              assert(await recorder.locator('.globalRecord').evaluate(node => document.activeElement === node), 'recorder restores opener focus');
+              assert(!await recorder.locator('.topApp').evaluate(node => node.inert), 'recorder restores background interaction');
+              await recorder.close();
+
+              const failSafe = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(failSafe);
               await login(failSafe);
               const response = await failSafe.goto(base + '/boss/', { waitUntil: 'domcontentloaded' });
               const failState = await shot(failSafe, '09-bos-direct-link-fail-safe-404', 'authenticated-sibling-denied');
               assert(response.status() === 404 && /not found/i.test(failState.text), 'BOS direct route fail safe');
               await failSafe.close();
 
-              const replay = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              const replay = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(replay);
               await login(replay);
               const oldCookie = (await replay.context().cookies()).find(cookie => cookie.name === 'utampa_session');
               assert(Boolean(oldCookie), 'session cookie exists before logout');
@@ -193,7 +256,7 @@ jobs:
               assert(!/Spartan Incubator Service/i.test(replayState.text), 'revoked session disclosed no dashboard');
               await replay.close();
 
-              const actions = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              const actions = await newPage({ viewport: { width: 390, height: 844 } });
               await routeAuthorizedSources(actions);
               await login(actions);
               await actions.waitForSelector('.todayDirective');
@@ -217,31 +280,100 @@ jobs:
               await actions.reload({ waitUntil: 'domcontentloaded' });
               await actions.waitForSelector('.todayDirective');
               assert(await actions.locator('.todayTask', { hasText: 'Review next-class deck' }).isVisible(), 'restored Today item persists after reload');
+              const routedTask = actions.locator('.todayTask', { hasText: 'Confirm lesson-plan sequence' });
+              await routedTask.click();
+              await actions.waitForSelector('.drawer .ut-action-controls');
+              await actions.locator('.drawer .ut-route').click();
+              assert(await actions.locator('.drawer .ut-action-controls select').getAttribute('aria-invalid') === 'true', 'empty route submission marks selection invalid');
+              assert(await actions.locator('.drawer .ut-route-error').isVisible(), 'empty route submission announces an inline error');
+              assert(await actions.locator('.drawer .ut-action-controls select').evaluate(node => document.activeElement === node), 'empty route submission focuses required selection');
+              await actions.locator('.drawer .ut-action-controls select').selectOption('UTampa');
+              assert(await actions.locator('.drawer .ut-route-error').isHidden(), 'route error clears after a valid selection');
+              await actions.locator('.drawer .ut-route').click();
+              assert(await routedTask.isHidden(), 'locally staged route leaves active Today list');
+              assert(/nobody notified/i.test(await actions.locator('.ut-toast').innerText()), 'route semantics state that nobody was notified');
+              assert(await actions.locator('.ut-toast').getAttribute('aria-atomic') === 'true', 'local route result is announced atomically');
+              await actions.reload({ waitUntil: 'domcontentloaded' });
+              await actions.waitForSelector('.todayDirective');
+              assert(await actions.locator('.todayTask', { hasText: 'Confirm lesson-plan sequence' }).isHidden(), 'locally staged route persists after reload');
+              await actions.locator('.ut-source-status .ut-mobile-actions-center').click();
+              const routedRecord = actions.locator('.ut-action-record', { hasText: 'Confirm lesson-plan sequence' });
+              assert(/Route staged locally/.test(await routedRecord.innerText()), 'Action Center labels local route truthfully');
+              await routedRecord.locator('.ut-restore-action').click();
+              await actions.locator('.ut-live-drawer .drawerClose').click();
+              assert(await actions.locator('.todayTask', { hasText: 'Confirm lesson-plan sequence' }).isVisible(), 'restored route-staged item returns to Today');
               await actions.close();
 
-              const service = await browser.newPage({ viewport: { width: 390, height: 844 } });
-              await routeAuthorizedSources(service, { events: [{ id: 'event-service', title: 'Spartan Incubator mentor review', start: '2026-09-24T16:00:00Z', end: '2026-09-24T17:00:00Z', url: 'https://calendar.google.com/calendar/event?eid=service', allDay: false }], files: [{ id: 'file-service', name: 'Spartan Incubator mentor notes', mimeType: 'application/vnd.google-apps.document', modifiedTime: '2026-09-22T15:00:00Z', url: 'https://drive.google.com/open?id=service' }] });
+              const service = await newPage({ viewport: { width: 844, height: 390 } });
+              const serviceEvents = Array.from({ length: 9 }, (_, index) => ({
+                id: 'event-service-' + index,
+                title: 'Spartan Incubator Calendar title match ' + (index + 1),
+                start: new Date(Date.now() + (index + 2) * 60 * 60 * 1000).toISOString(),
+                end: new Date(Date.now() + (index + 3) * 60 * 60 * 1000).toISOString(),
+                calendar: 'UTampa Outlook test feed',
+                url: 'https://calendar.google.com/calendar/event?eid=service-' + index,
+                allDay: false
+              }));
+              await routeAuthorizedSources(service, { events: serviceEvents, files: [{ id: 'file-service', name: 'Spartan Incubator mentor notes', mimeType: 'application/vnd.google-apps.document', modifiedTime: '2026-09-22T15:00:00Z', url: 'https://drive.google.com/open?id=service' }], driveTruncated: true });
               await login(service);
               await service.waitForSelector('.todayDirective');
               await service.locator('.sectionTabs button', { hasText: 'Teaching' }).click();
               await service.waitForSelector('.focusCourse');
               await service.waitForSelector('.ut-source-status[data-page="Teaching"]');
-              assert(/SOURCE-LINKED PROTOTYPE/.test(await service.locator('.ut-source-status').innerText()), 'Teaching source state');
+              assert(/PROTOTYPE COURSE WORKSPACE/.test(await service.locator('.ut-source-status').innerText()), 'Teaching source state');
+              const teachingDraft = service.locator('.phoneChat footer textarea');
+              await teachingDraft.fill('Synthetic browser-evidence draft');
+              const inlineSend = service.locator('.phoneChat footer button', { hasText: 'Send' });
+              await inlineSend.click();
+              await service.waitForSelector('.ut-live-drawer');
+              assert(/No message was sent or saved to a connected system/.test(await service.locator('.ut-live-drawer').innerText()), 'inline Teaching send stops at truthful boundary');
+              await service.locator('.ut-live-drawer .drawerClose').click();
+              assert(await teachingDraft.inputValue() === 'Synthetic browser-evidence draft', 'inline draft remains unsent and visibly local');
+              assert(await inlineSend.evaluate(node => document.activeElement === node), 'inline send preview restores opener focus');
               await service.locator('.sectionTabs button', { hasText: 'Research' }).click();
               await service.waitForSelector('.pipeline');
               await service.waitForSelector('.ut-source-status[data-page="Research"]');
               assert(/Research workflow is not connected/.test(await service.locator('.ut-source-status').innerText()), 'Research source state');
+              await service.getByRole('button', { name: 'Open manuscript', exact: true }).click();
+              await service.waitForSelector('.drawer');
+              assert(await service.locator('.drawer .ut-action-controls').count() === 0, 'non-Today prototype drawer does not claim persistent completion');
+              assert(!/Connected university source/.test(await service.locator('.drawer').innerText()), 'generic drawer does not claim an unverified connected source');
+              await service.locator('.drawer').getByRole('button', { name: 'Approve + continue', exact: true }).click();
+              await service.waitForSelector('.ut-live-drawer');
+              assert(/No connected-system action occurred/.test(await service.locator('.ut-live-drawer').innerText()), 'Research action stops at truthful discard boundary');
+              await service.locator('.ut-live-drawer .drawerClose').click();
+              const reviewChanges = service.getByRole('button', { name: 'Review changes', exact: true });
+              await reviewChanges.click();
+              await service.waitForSelector('.drawer[role="dialog"][aria-modal="true"]');
+              assert(await service.locator('.drawer').isVisible(), 'native React drawer reopens in the same session after intercepted action');
+              await service.keyboard.press('Escape');
+              await service.waitForSelector('.drawerShade', { state: 'detached' });
+              assert(await reviewChanges.evaluate(node => document.activeElement === node), 'native drawer Escape restores opener focus');
               await service.locator('.sectionTabs button', { hasText: 'Service' }).click();
               await service.waitForSelector('.serviceTopGrid');
               await service.waitForSelector('.ut-source-status[data-page="Service"]');
+              await service.waitForSelector('.ut-service-schedule-body .ut-event');
               const serviceState = await shot(service, '12-page-specific-workspaces', 'authenticated-page-specific-workspaces');
-              serviceState.nativeServiceVisible = /SAMPLE \/ PROTOTYPE DATA/.test(await service.locator('.ut-source-status').innerText());
-              assert(serviceState.nativeServiceVisible, 'Service native workspace and source state');
+              serviceState.nativeServiceVisible = /MIXED SOURCES/.test(await service.locator('.ut-source-status').innerText());
+              assert(serviceState.nativeServiceVisible, 'Service native workspace and mixed source state');
+              assert(await service.locator('.ut-service-schedule-body .ut-event').count() === 9, 'Service shows every authorized Calendar title match without a silent eight-item cap');
+              assert(/Spartan Incubator Calendar title match 1/.test(await service.locator('.ut-service-schedule-body').innerText()), 'Service schedule uses authorized Calendar event metadata');
+              assert(/AUTHORIZED CALENDAR TITLE MATCHES/.test(await service.locator('.lecCalendar').innerText()), 'Service title matching has precise provenance');
+              assert(/affiliation is not verified/i.test(await service.locator('.lecCalendar').innerText()), 'Service does not infer program affiliation from title keywords');
               await service.getByRole('button', { name: 'Share with founder', exact: true }).first().click();
-              await service.waitForSelector('.reviewModal');
+              await service.waitForSelector('.reviewModal[role="dialog"][aria-modal="true"]');
+              const reviewGeometry = await service.locator('.reviewModal').evaluate(node => {
+                const box = node.getBoundingClientRect();
+                const close = node.querySelector('.drawerClose').getBoundingClientRect();
+                return { top: box.top, bottom: box.bottom, viewport: innerHeight, overflowY: getComputedStyle(node).overflowY, closeWidth: close.width, closeHeight: close.height };
+              });
+              assert(reviewGeometry.top >= -1 && reviewGeometry.bottom <= reviewGeometry.viewport + 1, 'landscape review modal stays within viewport bounds');
+              assert(/auto|scroll/.test(reviewGeometry.overflowY), 'landscape review modal remains scrollable');
+              assert(reviewGeometry.closeWidth >= 44 && reviewGeometry.closeHeight >= 44, 'native modal close target is touch sized');
               await service.locator('.reviewModal').getByRole('button', { name: 'Share with founder', exact: true }).click();
               await service.waitForSelector('.ut-live-drawer');
-              assert(/Nothing was sent or submitted/.test(await service.locator('.ut-live-drawer').innerText()), 'external action stopped at local review boundary');
+              assert(/No connected-system action occurred/.test(await service.locator('.ut-live-drawer').innerText()), 'external action stopped at truthful discard boundary');
+              assert(/discarded/.test(await service.locator('.ut-live-drawer').innerText()), 'prototype entries are explicitly discarded');
               await service.locator('.ut-live-drawer .drawerClose').click();
               await service.locator('.sectionTabs button', { hasText: 'People' }).click();
               await service.waitForSelector('.peopleWorkspace');
@@ -249,25 +381,202 @@ jobs:
               assert(/No directory, contacts, or student system is connected/.test(await service.locator('.ut-source-status').innerText()), 'People data boundary');
               await service.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
               await service.waitForSelector('.ut-calendar-panel .ut-event');
-              assert(/Spartan Incubator mentor review/.test(await service.locator('.ut-calendar-panel').innerText()), 'Calendar authorized live content');
+              assert(/Spartan Incubator Calendar title match 1/.test(await service.locator('.ut-calendar-panel').innerText()), 'Calendar authorized live content');
               await service.locator('.ut-calendar-panel .ut-mobile-prepare').click();
               await service.waitForSelector('.ut-live-drawer .ut-file');
               assert(/Spartan Incubator mentor notes/.test(await service.locator('.ut-live-drawer').innerText()), 'Prepare Me related Drive source');
+              assert(/PARTIAL DRIVE RESULTS/.test(await service.locator('.ut-live-drawer').innerText()), 'Prepare Me discloses truncated Drive filename results');
               await service.close();
 
-              const noData = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              for (const [name, width, height] of [['12b-service-desktop-1440',1440,900],['12c-service-mobile-390',390,844],['12d-service-mobile-375',375,812]]) {
+                const page = await newPage({ viewport: { width, height } });
+                const start = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+                const end = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
+                await routeAuthorizedSources(page, { events: [{ id: 'portrait-service', title: 'Spartan Incubator portrait workflow', start, end, calendar: 'Authorized Outlook test feed', url: 'https://calendar.google.com/calendar/event?eid=portrait-service', allDay: false }] });
+                await login(page);
+                await page.locator('.sectionTabs button', { hasText: 'Service' }).click();
+                await page.waitForSelector('.ut-service-schedule-body .ut-event');
+                assert(/Spartan Incubator portrait workflow/.test(await page.locator('.ut-service-schedule-body').innerText()), name + ' authorized Service title match');
+                await page.getByRole('button', { name: 'Share with founder', exact: true }).first().click();
+                await page.waitForSelector('.reviewModal[role="dialog"][aria-modal="true"]');
+                const modalAction = page.locator('.reviewModal').getByRole('button', { name: 'Share with founder', exact: true });
+                await modalAction.scrollIntoViewIfNeeded();
+                const actionBox = await modalAction.boundingBox();
+                assert(Boolean(actionBox) && actionBox.y >= 0 && actionBox.y + actionBox.height <= height + 1, name + ' review action is reachable in viewport');
+                const serviceViewportState = await shot(page, name, 'authenticated-service-founder-review');
+                assert(serviceViewportState.geometry.scrollWidth <= serviceViewportState.geometry.clientWidth, name + ' no horizontal overflow');
+                await modalAction.click();
+                await page.waitForSelector('.ut-live-drawer');
+                assert(/No connected-system action occurred/.test(await page.locator('.ut-live-drawer').innerText()), name + ' founder action stops at truthful boundary');
+                await page.locator('.ut-live-drawer .drawerClose').click();
+                await page.close();
+              }
+
+              const noData = await newPage({ viewport: { width: 390, height: 844 } });
               await routeAuthorizedSources(noData, { events: [], files: [] });
               await login(noData);
               await noData.waitForSelector('.todayDirective');
+              let calendarClickRequests = 0;
+              noData.on('request', request => { if (new URL(request.url()).pathname === '/api/calendar') calendarClickRequests += 1; });
               await noData.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
               await noData.waitForFunction(() => document.body.innerText.includes('No events found'));
+              assert(calendarClickRequests === 1, 'Calendar tab click issues exactly one Calendar request');
               const noDataState = await shot(noData, '13-calendar-authorized-empty-state', 'authenticated-authorized-empty');
               const noDataText = await noData.locator('body').innerText();
-              noDataState.emptyStateVisible = noDataText.includes('No events found') && noDataText.includes('selected personal Google calendars');
+              noDataState.emptyStateVisible = noDataText.includes('No events found') && noDataText.includes('selected Google calendars');
               assert(noDataState.emptyStateVisible, 'authorized Calendar empty source explained');
               await noData.close();
 
-              const verifiedZero = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              const staleGuard = await newPage({ viewport: { width: 390, height: 844 } });
+              let calendarPhase = 'header';
+              let calendarPhaseRequest = 0;
+              await staleGuard.route('**/api/calendar', async route => {
+                calendarPhaseRequest += 1;
+                const requestInPhase = calendarPhaseRequest;
+                const future = hours => new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+                let title = calendarPhase === 'service-initial' ? 'Spartan Incubator initial result' : 'Header event';
+                let delay = 0;
+                if (calendarPhase === 'panel-initial') title = 'Initial panel result';
+                if (calendarPhase === 'panel-refresh') {
+                  title = requestInPhase === 1 ? 'Older panel refresh result' : 'Newest panel refresh result';
+                  delay = requestInPhase === 1 ? 250 : 10;
+                }
+                if (calendarPhase === 'service-refresh') {
+                  title = requestInPhase === 1 ? 'Spartan Incubator older refresh result' : 'Spartan Incubator newest refresh result';
+                  delay = requestInPhase === 1 ? 250 : 10;
+                }
+                if (calendarPhase === 'search') title = requestInPhase === 1 ? 'Old search calendar title' : 'New search calendar title';
+                if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+                await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ events: [{ id: calendarPhase + '-' + requestInPhase, title, start: future(2), end: future(3), calendar: 'Authorized test feed', allDay: false }], source: 'Google Calendar · read-only out-of-order fixture', partial: false, truncated: false, warnings: [] }) });
+              });
+              await staleGuard.route('**/api/drive**', async route => {
+                const query = new URL(route.request().url()).searchParams.get('q') || '';
+                const old = /^Old/i.test(query);
+                if (old) await new Promise(resolve => setTimeout(resolve, 250));
+                await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ files: [{ id: old ? 'old-file' : 'new-file', name: old ? 'Old stale filename' : 'New current filename', mimeType: 'text/plain', modifiedTime: new Date().toISOString() }], source: 'Google Drive metadata · read-only out-of-order fixture', truncated: false }) });
+              });
+              await login(staleGuard);
+              await staleGuard.waitForSelector('.ut-live-countdown[data-state="ready"]');
+
+              calendarPhase = 'panel-initial'; calendarPhaseRequest = 0;
+              await staleGuard.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await staleGuard.waitForFunction(() => document.body.innerText.includes('Initial panel result'));
+              calendarPhase = 'panel-refresh'; calendarPhaseRequest = 0;
+              await staleGuard.locator('.ut-calendar-panel .ut-refresh').click();
+              await staleGuard.locator('.ut-calendar-panel .ut-refresh').click();
+              await staleGuard.waitForFunction(() => document.body.innerText.includes('Newest panel refresh result'));
+              await staleGuard.waitForTimeout(300);
+              assert(!/Older panel refresh result/.test(await staleGuard.locator('.ut-calendar-content').innerText()), 'older Calendar refresh cannot overwrite the newest result');
+
+              calendarPhase = 'service-initial'; calendarPhaseRequest = 0;
+              await staleGuard.locator('.sectionTabs button', { hasText: 'Service' }).click();
+              await staleGuard.waitForFunction(() => document.body.innerText.includes('Spartan Incubator initial result'));
+              calendarPhase = 'service-refresh'; calendarPhaseRequest = 0;
+              await staleGuard.locator('.ut-service-refresh').click();
+              await staleGuard.locator('.ut-service-refresh').click();
+              await staleGuard.waitForFunction(() => document.body.innerText.includes('Spartan Incubator newest refresh result'));
+              await staleGuard.waitForTimeout(300);
+              assert(!/Spartan Incubator older refresh result/.test(await staleGuard.locator('.ut-service-schedule-body').innerText()), 'older Service refresh cannot overwrite the newest result');
+
+              await staleGuard.locator('.ut-source-status .ut-mobile-search').click();
+              calendarPhase = 'search'; calendarPhaseRequest = 0;
+              await staleGuard.locator('#ut-search-input').fill('Old');
+              await staleGuard.locator('.ut-search-form button').click();
+              await staleGuard.locator('#ut-search-input').fill('New');
+              await staleGuard.locator('.ut-search-form button').click();
+              await staleGuard.waitForFunction(() => document.body.innerText.includes('New current filename'));
+              await staleGuard.waitForTimeout(300);
+              const newestSearchText = await staleGuard.locator('.ut-search-results').innerText();
+              assert(/New current filename/.test(newestSearchText) && !/Old stale filename/.test(newestSearchText), 'older Search response cannot overwrite the newest result');
+              await staleGuard.close();
+
+              const partial = await newPage({ viewport: { width: 375, height: 812 } });
+              await routeAuthorizedSources(partial, { events: [], files: [], partial: true });
+              await login(partial);
+              await partial.waitForSelector('.todayDirective');
+              await partial.locator('.sectionTabs button', { hasText: 'Service' }).click();
+              await partial.waitForFunction(() => document.body.innerText.includes('No complete program schedule available'));
+              assert(/PARTIAL CALENDAR DATA/.test(await partial.locator('.ut-service-schedule-body').innerText()), 'Service schedule exposes partial Calendar state');
+              await partial.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await partial.waitForFunction(() => document.body.innerText.includes('No complete result available'));
+              const partialState = await shot(partial, '13b-calendar-partial-source-state', 'authenticated-partial-calendar');
+              partialState.partialStateVisible = /PARTIAL CALENDAR DATA/.test(await partial.locator('.ut-calendar-content').innerText());
+              assert(partialState.partialStateVisible, 'Calendar never presents partial failure as clean empty state');
+              assert(partialState.geometry.scrollWidth <= partialState.geometry.clientWidth, 'partial Calendar mobile overflow');
+              await partial.close();
+
+              const truncated = await newPage({ viewport: { width: 320, height: 568 } });
+              await routeAuthorizedSources(truncated, { events: [], files: [], truncated: true });
+              await login(truncated);
+              await truncated.waitForSelector('.ut-live-countdown[data-state="partial"]');
+              await truncated.locator('.sectionTabs button', { hasText: 'Service' }).click();
+              await truncated.waitForFunction(() => document.body.innerText.includes('No complete program schedule available'));
+              assert(/PARTIAL CALENDAR DATA/.test(await truncated.locator('.ut-service-schedule-body').innerText()), 'truncated-only Service state is never presented as clean empty');
+              await truncated.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await truncated.waitForFunction(() => document.body.innerText.includes('No complete result available'));
+              const truncatedState = await shot(truncated, '13c-calendar-truncated-only-state', 'authenticated-truncated-calendar');
+              assert(!/No events found/.test(await truncated.locator('.ut-calendar-content').innerText()), 'truncated-only Calendar state is not clean empty');
+              assert(truncatedState.geometry.scrollWidth <= truncatedState.geometry.clientWidth, 'truncated Calendar 320px overflow');
+              await truncated.close();
+
+              const reconnect = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(reconnect, { calendarStatus: 409, driveStatus: 409 });
+              await login(reconnect);
+              await reconnect.waitForSelector('.ut-live-countdown[data-state="reauthorize"]');
+              await reconnect.locator('.sectionTabs button', { hasText: 'Service' }).click();
+              await reconnect.waitForFunction(() => document.body.innerText.includes('Reconnect Google to finish setup'));
+              assert(!/No matching Calendar titles found/.test(await reconnect.locator('.ut-service-schedule-body').innerText()), 'Calendar reauthorization is not rendered as empty Service data');
+              await reconnect.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await reconnect.waitForFunction(() => document.body.innerText.includes('Reconnect Google to finish setup'));
+              assert(!/No events found/.test(await reconnect.locator('.ut-calendar-content').innerText()), 'Calendar reauthorization is not rendered as empty Calendar data');
+              await reconnect.close();
+
+              const unavailable = await newPage({ viewport: { width: 844, height: 390 } });
+              await routeAuthorizedSources(unavailable, { calendarStatus: 502, driveStatus: 502 });
+              await login(unavailable);
+              await unavailable.waitForSelector('.ut-live-countdown[data-state="error"]');
+              await unavailable.locator('.sectionTabs button', { hasText: 'Service' }).click();
+              await unavailable.waitForFunction(() => document.body.innerText.includes('Program schedule unavailable'));
+              assert(/Static or sample program events are not shown as a fallback/.test(await unavailable.locator('.ut-service-schedule-body').innerText()), 'Calendar failure never falls back to sample Service events');
+              assert(await unavailable.locator('.ut-service-schedule-body [role="alert"]').getAttribute('aria-live') === 'assertive', 'Service source failure is announced assertively');
+              await unavailable.locator('.sectionTabs button', { hasText: 'Calendar' }).click();
+              await unavailable.waitForFunction(() => document.body.innerText.includes('Calendar is temporarily unavailable'));
+              assert(!/No events found/.test(await unavailable.locator('.ut-calendar-content').innerText()), 'Calendar failure is not rendered as empty data');
+              assert(await unavailable.locator('.ut-calendar-content [role="alert"]').getAttribute('aria-atomic') === 'true', 'Calendar source failure is announced atomically');
+              await unavailable.close();
+
+              const driveReconnect = await newPage({ viewport: { width: 1440, height: 900 } });
+              await routeAuthorizedSources(driveReconnect, { driveStatus: 409 });
+              await login(driveReconnect);
+              await driveReconnect.waitForSelector('.ut-live-countdown[data-state="ready"]');
+              await driveReconnect.locator('.prepareHeader').click();
+              await driveReconnect.waitForFunction(() => document.body.innerText.includes('Reconnect Google to finish setup'));
+              assert(/Reconnect Google to finish setup/.test(await driveReconnect.locator('.ut-live-drawer').innerText()), 'Drive reauthorization is explicit in Prepare Me');
+              await driveReconnect.close();
+
+              const driveUnavailable = await newPage({ viewport: { width: 1440, height: 900 } });
+              await routeAuthorizedSources(driveUnavailable, { driveStatus: 502 });
+              await login(driveUnavailable);
+              await driveUnavailable.waitForSelector('.ut-live-countdown[data-state="ready"]');
+              await driveUnavailable.locator('.prepareHeader').click();
+              await driveUnavailable.waitForFunction(() => document.body.innerText.includes('Prepare Me is temporarily unavailable'));
+              assert(/Nothing was changed/.test(await driveUnavailable.locator('.ut-live-drawer').innerText()), 'Drive failure leaves explicit unchanged state');
+              assert(await driveUnavailable.locator('.ut-live-drawer [role="alert"]').getAttribute('aria-live') === 'assertive', 'Prepare Me failure is announced assertively');
+              await driveUnavailable.close();
+
+              const driveTruncatedEmpty = await newPage({ viewport: { width: 390, height: 844 } });
+              await routeAuthorizedSources(driveTruncatedEmpty, { files: [], driveTruncated: true });
+              await login(driveTruncatedEmpty);
+              await driveTruncatedEmpty.waitForSelector('.ut-live-countdown[data-state="ready"]');
+              await driveTruncatedEmpty.waitForSelector('.ut-source-status .ut-mobile-prepare');
+              await driveTruncatedEmpty.locator('.ut-source-status .ut-mobile-prepare').click();
+              await driveTruncatedEmpty.waitForFunction(() => document.body.innerText.includes('No complete Drive filename result'));
+              const driveTruncatedText = await driveTruncatedEmpty.locator('.ut-live-drawer').innerText();
+              assert(/PARTIAL DRIVE RESULTS/.test(driveTruncatedText), 'empty first Drive page discloses truncation');
+              assert(!/No matching Drive filenames were found/.test(driveTruncatedText), 'truncated empty first Drive page is never presented as verified empty');
+              await driveTruncatedEmpty.close();
+
+              const verifiedZero = await newPage({ viewport: { width: 390, height: 844 } });
               await routeAuthorizedSources(verifiedZero);
               await login(verifiedZero);
               await verifiedZero.waitForSelector('.todayDirective');
@@ -278,13 +587,21 @@ jobs:
               const zeroText = await verifiedZero.locator('body').innerText();
               zeroState.peopleBoundaryVisible = zeroText.includes('No directory, contacts, or student system is connected') && zeroText.includes('source-needed are not verified');
               assert(zeroState.peopleBoundaryVisible, 'People boundary and provenance state');
-              await verifiedZero.locator('.ut-source-status .ut-mobile-search').click();
+              const searchOpener = verifiedZero.locator('.ut-source-status .ut-mobile-search');
+              await searchOpener.click();
+              assert(await verifiedZero.locator('.ut-live-drawer').getAttribute('role') === 'dialog', 'live drawer has dialog semantics');
+              assert(await verifiedZero.locator('.ut-live-drawer').getAttribute('aria-modal') === 'true', 'live drawer is modal');
               await verifiedZero.locator('#ut-search-input').fill('ENT 330');
               await verifiedZero.locator('.ut-search-form button').click();
               await verifiedZero.waitForSelector('.ut-search-results .ut-event');
               assert(/ENT 330 · Venture Validation/.test(await verifiedZero.locator('.ut-search-results').innerText()), 'Search returns authorized Calendar result');
+              await verifiedZero.keyboard.press('Escape');
+              await verifiedZero.waitForSelector('.ut-live-shade', { state: 'detached' });
+              assert(await searchOpener.evaluate(node => document.activeElement === node), 'Escape closes live drawer and restores opener focus');
               await verifiedZero.close();
 
+              evidence.diagnostics = diagnostics;
+              assert(diagnostics.length === 0, 'no console, page, or failed-request diagnostics: ' + diagnostics.join(' | '));
               evidence.verdict = evidence.failures.length ? 'FAIL' : 'PASS';
               fs.writeFileSync('evidence/evidence.json', JSON.stringify(evidence, null, 2));
               if (evidence.failures.length) process.exitCode = 1;
@@ -293,26 +610,68 @@ jobs:
           NODE
           node evidence.cjs
 
-      - name: Manifest and checksums
-        if: always()
+      - name: Finalize ready evidence
+        if: success()
         shell: bash
         run: |
           set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const evidence = JSON.parse(fs.readFileSync('evidence/evidence.json', 'utf8'));
+          if (evidence.exactHead !== process.env.RC_SHA) throw new Error('evidence exact head mismatch');
+          if (evidence.verdict !== 'PASS') throw new Error('evidence verdict is not PASS');
+          if (!Array.isArray(evidence.failures) || evidence.failures.length) throw new Error('evidence contains failures');
+          if (!Array.isArray(evidence.diagnostics) || evidence.diagnostics.length) throw new Error('evidence contains diagnostics');
+          if (!Array.isArray(evidence.screenshots) || !evidence.screenshots.length) throw new Error('evidence has no screenshots');
+          if (!evidence.runtime || !evidence.runtime.node || evidence.runtime.playwright !== '1.55.0' || !evidence.runtime.browser) throw new Error('evidence runtime versions are missing or unexpected');
+          for (const file of evidence.screenshots) {
+            if (!fs.existsSync('evidence/' + file)) throw new Error('missing screenshot: ' + file);
+          }
+          NODE
           cp utampa.log evidence/utampa.log 2>/dev/null || true
           {
             echo "UTAMPA_EXACT_BROWSER_EVIDENCE_READY"
             echo "EXACT_HEAD=$RC_SHA"
             echo "RUN_URL=https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "IDENTITY=injected synthetic Google OIDC; no real account or token"
-            echo "DATA=browser-routed sanitized Calendar/Drive metadata fixtures only; no real/private/FERPA/student/founder data"
+            echo "IDENTITY=injected synthetic Google OIDC for bert@bertseither.com; no real account or token"
+            echo "DATA=committed prototype interface plus browser-routed synthetic Calendar/Drive metadata fixtures; no external private/protected source or real account was queried"
+          } > evidence/MANIFEST.txt
+          node <<'NODE' >> evidence/MANIFEST.txt
+          const evidence = require('./evidence/evidence.json');
+          console.log('RUNTIME_NODE=' + evidence.runtime.node);
+          console.log('RUNTIME_PLAYWRIGHT=' + evidence.runtime.playwright);
+          console.log('RUNTIME_BROWSER=' + evidence.runtime.browser);
+          NODE
+          find evidence -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > evidence/SHA256SUMS.txt
+
+      - name: Upload exact ready evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: utampa-exact-browser-evidence-${{ env.RC_SHA }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Finalize failed diagnostics
+        if: failure() || cancelled()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cp utampa.log evidence/utampa.log 2>/dev/null || true
+          {
+            echo "UTAMPA_EXACT_BROWSER_EVIDENCE_NOT_READY"
+            echo "EXACT_HEAD=$RC_SHA"
+            echo "RUN_URL=https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } > evidence/MANIFEST.txt
           find evidence -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > evidence/SHA256SUMS.txt
 
-      - name: Upload exact evidence
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Upload failed browser diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: utampa-exact-browser-evidence
+          name: utampa-browser-diagnostics-${{ env.RC_SHA }}
           path: evidence/
           if-no-files-found: error
           retention-days: 7

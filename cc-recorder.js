@@ -28,6 +28,8 @@
    ==========================================================================*/
 (function () {
   "use strict";
+  if (window.__ccRecorderInitialized) return;
+  window.__ccRecorderInitialized = true;
 
   var DEST_FALLBACK = ["Needs Bert", "Projects", "Messages"];
 
@@ -126,7 +128,7 @@
 
   /* --- panel ------------------------------------------------------------- */
   var panel, elTime, elState, elStart, elPause, elStop, elSave, elDest,
-      elConfirm, elDestNote, elHint, elDone, prevFocus;
+      elConfirm, elDestNote, elHint, elDone, prevFocus, inerted = [];
 
   var TICK = null, running = false, elapsedMs = 0, startedAt = 0,
       stopped = false, destConfirmed = false;
@@ -137,37 +139,37 @@
     panel.className = "cc-rec";
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-modal", "true");
-    panel.setAttribute("aria-label", "Recording");
+    panel.setAttribute("aria-label", "Recording prototype");
     panel.setAttribute("aria-hidden", "true");
     panel.hidden = true;
     panel.innerHTML =
       '<div class="cc-rec__scrim" data-cc-close></div>' +
       '<div class="cc-rec__panel">' +
         '<button class="cc-rec__close" data-cc-close aria-label="Close recording panel">×</button>' +
-        '<span class="cc-rec__eyebrow">Recording</span>' +
-        '<h2 class="cc-rec__title">Record</h2>' +
-        '<p class="cc-rec__sub">Prototype · no audio is captured. The timer, states and filing destination behave exactly as the shipped control will.</p>' +
+        '<span class="cc-rec__eyebrow">Recording prototype</span>' +
+        '<h2 class="cc-rec__title">Preview recording controls</h2>' +
+        '<p class="cc-rec__sub">Prototype · no audio is captured. Timer and destination controls are a local interaction preview only.</p>' +
         '<div class="cc-rec__meter">' +
           '<span class="cc-rec__dot" aria-hidden="true"></span>' +
           '<span class="cc-rec__time" id="cc-rec-time" role="timer" aria-live="off">00:00</span>' +
           '<span class="cc-rec__state" id="cc-rec-state">Ready</span>' +
         '</div>' +
         '<div class="cc-rec__controls">' +
-          '<button class="cc-rec__btn cc-rec__btn--primary" id="cc-rec-start">Start</button>' +
-          '<button class="cc-rec__btn" id="cc-rec-pause" disabled>Pause</button>' +
-          '<button class="cc-rec__btn" id="cc-rec-stop" disabled>Stop</button>' +
+          '<button class="cc-rec__btn cc-rec__btn--primary" id="cc-rec-start">Start timer</button>' +
+          '<button class="cc-rec__btn" id="cc-rec-pause" disabled>Pause timer</button>' +
+          '<button class="cc-rec__btn" id="cc-rec-stop" disabled>Stop timer</button>' +
         '</div>' +
         '<div class="cc-rec__field">' +
-          '<label class="cc-rec__label" for="cc-rec-dest">Filing destination</label>' +
+          '<label class="cc-rec__label" for="cc-rec-dest">Simulated destination</label>' +
           '<div class="cc-rec__destrow">' +
             '<select class="cc-rec__select" id="cc-rec-dest"></select>' +
             '<button class="cc-rec__btn cc-rec__btn--confirm" id="cc-rec-confirm">Confirm</button>' +
           '</div>' +
-          '<p class="cc-rec__note" id="cc-rec-destnote">Choose where this recording is filed, then confirm.</p>' +
+          '<p class="cc-rec__note" id="cc-rec-destnote">Choose a simulated destination for this preview, then confirm.</p>' +
         '</div>' +
         '<div class="cc-rec__foot">' +
-          '<button class="cc-rec__btn cc-rec__btn--save" id="cc-rec-save" disabled>Save</button>' +
-          '<span class="cc-rec__hint" id="cc-rec-hint">Stop the recording and confirm a destination to save.</span>' +
+          '<button class="cc-rec__btn cc-rec__btn--save" id="cc-rec-save" disabled>Finish preview</button>' +
+          '<span class="cc-rec__hint" id="cc-rec-hint">Stop the timer and confirm a simulated destination to finish.</span>' +
         '</div>' +
         '<p class="cc-rec__done" id="cc-rec-done" hidden></p>' +
       '</div>';
@@ -197,7 +199,7 @@
       destConfirmed = false;
       elConfirm.disabled = false;
       elConfirm.textContent = "Confirm";
-      elDestNote.textContent = "Choose where this recording is filed, then confirm.";
+      elDestNote.textContent = "Choose a simulated destination for this preview, then confirm.";
       elDestNote.classList.remove("is-ok");
       render();
     });
@@ -233,7 +235,7 @@
   }
 
   function trapTab(e) {
-    var f = panel.querySelectorAll("button:not([disabled]), select, [href], input");
+    var f = panel.querySelectorAll("button:not([disabled]), select:not([disabled]), [href], input:not([disabled])");
     if (!f.length) return;
     var first = f[0], last = f[f.length - 1];
     if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
@@ -254,7 +256,12 @@
     return (h ? h + ":" + pad(m) : pad(m)) + ":" + pad(s);
   }
 
-  function tick() { elTime.textContent = fmt(currentMs()); }
+  function tick() {
+    var value = fmt(currentMs());
+    if (elTime.textContent === value) return;
+    if (elTime.firstChild && elTime.firstChild.nodeType === 3) elTime.firstChild.data = value;
+    else elTime.textContent = value;
+  }
 
   function startTick() {
     stopTick();
@@ -298,7 +305,7 @@
     destConfirmed = true;
     elConfirm.disabled = true;
     elConfirm.textContent = "Confirmed";
-    elDestNote.textContent = "Filing to " + elDest.value + " · confirmed.";
+    elDestNote.textContent = "Simulated destination " + elDest.value + " · confirmed for this preview.";
     elDestNote.classList.add("is-ok");
     render();
     /* Confirm has just been disabled. If it held focus, the browser drops focus
@@ -311,9 +318,9 @@
     if (elSave.disabled) return;
     var dur = fmt(currentMs()), dest = elDest.value;
     elDone.hidden = false;
-    elDone.textContent = "Saved · " + dur + " filed to " + dest +
-      " in " + CFG.label + ". Prototype — nothing was uploaded.";
-    elState.textContent = "Saved";
+    elDone.textContent = "Prototype complete · " + dur + " · simulated destination " + dest +
+      " in " + CFG.label + ". Nothing was captured, filed or uploaded.";
+    elState.textContent = "Prototype complete";
     panel.setAttribute("data-cc-state", "saved");
     elStart.disabled = elPause.disabled = elStop.disabled = elSave.disabled = true;
     elConfirm.disabled = true;
@@ -324,7 +331,7 @@
        never as the primary result. */
     try {
       if (typeof window.toast === "function") {
-        window.toast("Recording saved · " + dur + " · " + dest);
+        window.toast("Recording prototype complete · nothing captured or filed");
       }
     } catch (err) {}
   }
@@ -333,18 +340,18 @@
     var state = stopped ? "stopped" : running ? "recording"
       : currentMs() > 0 ? "paused" : "idle";
     panel.setAttribute("data-cc-state", state);
-    elState.textContent = { idle: "Ready", recording: "Recording",
-      paused: "Paused", stopped: "Stopped" }[state];
+    elState.textContent = { idle: "Ready", recording: "Timer running",
+      paused: "Timer paused", stopped: "Timer stopped" }[state];
     elStart.disabled = stopped || running || currentMs() > 0;
     elPause.disabled = stopped || currentMs() === 0 && !running;
-    elPause.textContent = running ? "Pause" : (currentMs() > 0 ? "Resume" : "Pause");
+    elPause.textContent = running ? "Pause timer" : (currentMs() > 0 ? "Resume timer" : "Pause timer");
     elStop.disabled = stopped || (currentMs() === 0 && !running);
     var ready = stopped && destConfirmed;
     elSave.disabled = !ready;
-    elHint.textContent = ready ? "Ready to save."
-      : stopped ? "Confirm a filing destination to save."
-      : destConfirmed ? "Stop the recording to save."
-      : "Stop the recording and confirm a destination to save.";
+    elHint.textContent = ready ? "Ready to finish this preview."
+      : stopped ? "Confirm a simulated destination to finish."
+      : destConfirmed ? "Stop the timer to finish this preview."
+      : "Stop the timer and confirm a simulated destination to finish.";
   }
 
   function reset() {
@@ -354,7 +361,7 @@
     elDest.disabled = false;
     elConfirm.disabled = false;
     elConfirm.textContent = "Confirm";
-    elDestNote.textContent = "Choose where this recording is filed, then confirm.";
+    elDestNote.textContent = "Choose a simulated destination for this preview, then confirm.";
     elDestNote.classList.remove("is-ok");
     elDone.hidden = true; elDone.textContent = "";
     elTime.textContent = "00:00";
@@ -362,10 +369,26 @@
   }
 
   /* --- open / close ------------------------------------------------------ */
+  function inertBackground() {
+    inerted = [];
+    Array.prototype.forEach.call(document.body.children, function (node) {
+      if (node === panel) return;
+      inerted.push({ node: node, inert: Boolean(node.inert) });
+      node.inert = true;
+    });
+  }
+
+  function restoreBackground() {
+    inerted.forEach(function (record) { if (record.node.isConnected) record.node.inert = record.inert; });
+    inerted = [];
+  }
+
   function open() {
+    if (!panel.hidden) { keepFocusInPanel(); return; }
     prevFocus = document.activeElement;
     fillDestinations();
     reset();
+    inertBackground();
     panel.hidden = false;
     panel.setAttribute("aria-hidden", "false");
     /* next frame so the transition runs */
@@ -374,10 +397,12 @@
   }
 
   function close() {
+    if (panel.hidden) return;
     stopTick();
     panel.classList.remove("is-open");
     panel.setAttribute("aria-hidden", "true");
     panel.hidden = true;
+    restoreBackground();
     if (prevFocus && prevFocus.focus) prevFocus.focus();
   }
 
@@ -388,10 +413,12 @@
     ctrl.__ccRecWired = true;
     ctrl.setAttribute("data-cc-recorder", "1");
     ctrl.setAttribute("aria-haspopup", "dialog");
+    ctrl.setAttribute("aria-label", "Open recording controls preview");
+    ctrl.setAttribute("title", "Prototype controls · no audio is captured");
     ctrl.addEventListener("click", function (e) {
       e.preventDefault();
-      e.stopPropagation();          /* capture phase: the prototype's own
-                                       onclick never runs */
+      e.stopImmediatePropagation(); /* capture phase: no prototype click
+                                       handler runs for this control */
       open();
     }, true);
   }

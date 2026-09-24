@@ -31,7 +31,7 @@
   /* ---- The only block that changes when a workspace URL changes ---- */
   var WORKSPACES = [
     { key: 'utampa', match: /^u\s*tampa|faculty\s*os/i,
-      url: 'https://utampa-faculty-os-prototype.onrender.com/' },
+      url: 'https://utampa-faculty-os-prod.onrender.com/' },
     { key: 'bos',    match: /^bos\b|^boss\b/i,
       url: null },
     { key: 'ep',     match: /entrepreneurship\s*professor/i,

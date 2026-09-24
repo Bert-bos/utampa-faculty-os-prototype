@@ -87,6 +87,24 @@ function safeNext(value) {
   } catch { return "/"; }
 }
 
+function safeGoogleUrl(value, allowedHosts) {
+  try {
+    const target = new URL(String(value || ""));
+    if (target.protocol !== "https:" || !allowedHosts.has(target.hostname.toLowerCase())) return "";
+    return target.toString();
+  } catch { return ""; }
+}
+
+function opaqueEventId(calendarId, eventId) {
+  return crypto.createHash("sha256").update(`${calendarId}\u0000${eventId}`).digest("base64url").slice(0, 24);
+}
+
+function sanitizeIndexHtml(value) {
+  return String(value).replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, block =>
+    block.includes("__CF$cv$params") && block.includes("/cdn-cgi/challenge-platform/") ? "" : block
+  );
+}
+
 function securityHeaders(contentType) {
   return {
     "Cache-Control": "no-store",
@@ -107,7 +125,7 @@ function send(res, status, body, contentType = "text/plain; charset=utf-8", extr
 function signInPage(next, error = false) {
   const alert = error ? '<p id="auth-error" class="error" role="alert" aria-live="assertive" aria-atomic="true" tabindex="-1">We could not complete sign-in. Please try again with your authorized personal Google account.</p>' : "";
   const behavior = '<script>(()=>{const error=document.getElementById("auth-error");if(error)error.focus();const link=document.getElementById("google-sign-in");const status=document.getElementById("auth-status");if(link&&status)link.addEventListener("click",()=>{status.textContent="Opening Google sign-in…";link.setAttribute("aria-busy","true")},{once:true})})()</script>';
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>My Work Login</title><style>:root{font-family:Inter,Arial,sans-serif;color:#171717;background:#f5f5f3}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}main{width:min(100%,480px);background:#fff;border-top:8px solid #252a2e;border-radius:12px;box-shadow:0 16px 48px #0002;padding:32px}h1{margin:0 0 8px;font-size:clamp(1.75rem,6vw,2.25rem)}p{line-height:1.5}.google{min-height:48px;width:100%;display:flex;align-items:center;justify-content:center;margin:24px 0 16px;border:2px solid #171717;border-radius:8px;background:#171717;color:#fff;font-weight:700;text-decoration:none}.google:focus-visible{outline:4px solid #3b82f6;outline-offset:3px}.error{border-left:4px solid #b42318;background:#fff2f2;padding:12px}.note{font-size:.92rem;color:#4b4b4b}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}</style></head><body><main><h1>My Work Login</h1><p>Use your authorized personal Google account to open the private dashboard.</p>${alert}<a id="google-sign-in" class="google" data-testid="google-sign-in" aria-describedby="auth-disclosure" href="/auth/google?next=${encodeURIComponent(next)}">Continue with Google</a><p id="auth-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p><p id="auth-disclosure" class="note">Calendar and Drive access remain read-only.</p></main>${behavior}</body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>My Work Login</title><style>:root{font-family:Inter,Arial,sans-serif;color:#171717;background:#f5f5f3}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}main{width:min(100%,480px);background:#fff;border-top:8px solid #252a2e;border-radius:12px;box-shadow:0 16px 48px #0002;padding:32px}h1{margin:0 0 8px;font-size:clamp(1.75rem,6vw,2.25rem)}p{line-height:1.5}.google{min-height:48px;width:100%;display:flex;align-items:center;justify-content:center;margin:24px 0 16px;border:2px solid #171717;border-radius:8px;background:#171717;color:#fff;font-weight:700;text-decoration:none}.google:focus-visible{outline:4px solid #3b82f6;outline-offset:3px}.error{border-left:4px solid #b42318;background:#fff2f2;padding:12px}.note{font-size:.92rem;color:#4b4b4b}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}</style></head><body><main><h1>My Work Login</h1><p>Use your authorized personal Google account to open the private dashboard.</p>${alert}<a id="google-sign-in" class="google" data-testid="google-sign-in" aria-describedby="auth-disclosure" href="/auth/google?next=${encodeURIComponent(next)}">Continue with Google</a><p id="auth-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p><p id="auth-disclosure" class="note">Sign-in requests identity plus read-only Calendar event metadata and Drive filename metadata visible to this personal Google account. University accounts, Canvas, Workday, student records, and institutional systems are not connected.</p></main>${behavior}</body></html>`;
 }
 
 function parseJwtPart(value) {
@@ -177,7 +195,12 @@ function createGoogleOAuthProvider(config) {
         method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
         body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: "refresh_token" })
       });
-      if (!response.ok) throw new Error("Google access refresh failed");
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        const error = new Error("Google access refresh failed");
+        if ((response.status === 400 && body.error === "invalid_grant") || response.status === 401 || response.status === 403) error.status = 401;
+        throw error;
+      }
       const token = await response.json();
       if (typeof token.access_token !== "string" || !token.access_token) throw new Error("Google access token missing");
       return {
@@ -195,7 +218,7 @@ function createSyntheticOAuthProvider() {
     authorizationUrl({ state, nonce }) { return `/__test/authorize?state=${encodeURIComponent(state)}&nonce=${encodeURIComponent(nonce)}`; },
     async exchangeAndVerify({ code, expectedNonce }) {
       if (code !== `synthetic:${expectedNonce}`) throw new Error("synthetic identity rejected");
-      return { sub: "synthetic-subject", email: "bert@utampa.edu", accessToken: "synthetic-access-token", refreshToken: "synthetic-refresh-token", accessTokenExpiresAt: Date.now() + 3600000, grantedScope: GOOGLE_SCOPES };
+      return { sub: "synthetic-subject", email: "bert@bertseither.com", accessToken: "synthetic-access-token", refreshToken: "synthetic-refresh-token", accessTokenExpiresAt: Date.now() + 3600000, grantedScope: GOOGLE_SCOPES };
     },
     async refresh() {
       return { accessToken: "synthetic-refreshed-token", accessTokenExpiresAt: Date.now() + 3600000, grantedScope: GOOGLE_SCOPES };
@@ -354,48 +377,100 @@ function createApp(options = {}) {
 
       if (pathname === "/api/calendar") {
         if (req.method !== "GET") return send(res, 405, "Method not allowed", undefined, { Allow: "GET" });
-        const timeMin = new Date(Math.max(Date.now() - 12 * 60 * 60 * 1000, Number(requestUrl.searchParams.get("timeMin") || 0) || 0));
-        const timeMax = new Date(Math.min(timeMin.getTime() + 31 * 24 * 60 * 60 * 1000, Number(requestUrl.searchParams.get("timeMax") || 0) || timeMin.getTime() + 14 * 24 * 60 * 60 * 1000));
+        const requestedMin = requestUrl.searchParams.get("timeMin");
+        const requestedMax = requestUrl.searchParams.get("timeMax");
+        const defaultMin = now() - 12 * 60 * 60 * 1000;
+        const minMs = requestedMin === null || requestedMin === "" ? defaultMin : Number(requestedMin);
+        const maxMs = requestedMax === null || requestedMax === "" ? minMs + 14 * 24 * 60 * 60 * 1000 : Number(requestedMax);
+        if (!Number.isFinite(minMs) || !Number.isFinite(maxMs) || maxMs <= minMs || maxMs - minMs > 31 * 24 * 60 * 60 * 1000) {
+          return send(res, 400, JSON.stringify({ error: "invalid_time_range" }), "application/json; charset=utf-8");
+        }
+        const timeMin = new Date(minMs);
+        const timeMax = new Date(maxMs);
         try {
           const calendarListUrl = new URL(GOOGLE_CALENDAR_LIST_ENDPOINT);
           calendarListUrl.search = new URLSearchParams({
             maxResults: "250", showDeleted: "false",
-            fields: "items(id,summary,primary,selected,hidden,deleted,accessRole)"
+            fields: "nextPageToken,items(id,summary,primary,selected,hidden,deleted,accessRole)"
           });
           const calendarList = await googleJson(session, calendarListUrl);
           if (calendarList.reauthorize) return send(res, 409, JSON.stringify({ error: "reauthorization_required" }), "application/json; charset=utf-8");
-          const calendars = (Array.isArray(calendarList.items) ? calendarList.items : [])
+          if (!Array.isArray(calendarList.items)) throw new Error("Calendar list response invalid");
+          if (calendarList.items.some(item => !item || typeof item !== "object" || typeof item.id !== "string" || !item.id)) throw new Error("Calendar list item invalid");
+          const selectedCalendars = calendarList.items
             .filter(item => item && !item.deleted && !item.hidden && (item.primary === true || item.selected === true))
-            .filter(item => typeof item.id === "string" && item.id)
-            .slice(0, 50);
-          if (!calendars.some(item => item.primary === true)) calendars.unshift({ id: "primary", summary: "Primary", primary: true });
+            .filter(item => typeof item.id === "string" && item.id);
+          if (!selectedCalendars.some(item => item.primary === true)) selectedCalendars.unshift({ id: "primary", summary: "Primary", primary: true });
+          const calendarListHasMore = Boolean(calendarList.nextPageToken);
+          const selectedCalendarCapReached = selectedCalendars.length > 50;
+          const calendarListTruncated = calendarListHasMore || selectedCalendarCapReached;
+          const calendars = selectedCalendars.slice(0, 50);
 
           const eventGroups = await Promise.all(calendars.map(async calendar => {
             const target = new URL(`${GOOGLE_CALENDAR_BASE}/${encodeURIComponent(calendar.id)}/events`);
             target.search = new URLSearchParams({
-              timeMin: timeMin.toISOString(), timeMax: timeMax.toISOString(), singleEvents: "true", orderBy: "startTime", maxResults: "100",
+              timeMin: timeMin.toISOString(), timeMax: timeMax.toISOString(), singleEvents: "true", orderBy: "startTime", maxResults: "2500",
               fields: "items(id,summary,start,end,location,htmlLink,status),nextPageToken"
             });
             try {
               const data = await googleJson(session, target);
-              if (data.reauthorize) return { reauthorize: true, events: [] };
-              const events = Array.isArray(data.items) ? data.items.filter(item => item && item.status !== "cancelled").map(item => ({
-                id: `${calendar.id}:${String(item.id || "")}`, title: String(item.summary || "Busy"),
-                start: String(item.start?.dateTime || item.start?.date || ""), end: String(item.end?.dateTime || item.end?.date || ""),
-                allDay: Boolean(item.start?.date && !item.start?.dateTime), location: String(item.location || ""), url: String(item.htmlLink || ""),
-                calendar: String(calendar.summary || (calendar.primary ? "Primary" : "Subscribed calendar"))
-              })) : [];
-              return { reauthorize: false, events };
+              if (data.reauthorize) return { reauthorize: true, loaded: false, events: [] };
+              if (!Array.isArray(data.items)) {
+                const invalid = new Error("Calendar events response invalid");
+                invalid.code = "calendar_invalid_response";
+                throw invalid;
+              }
+              let invalidCount = 0;
+              const events = data.items.flatMap(item => {
+                if (item && item.status === "cancelled") return [];
+                const start = String(item?.start?.dateTime || item?.start?.date || "");
+                const end = String(item?.end?.dateTime || item?.end?.date || "");
+                if (!item || typeof item !== "object" || typeof item.id !== "string" || !item.id || !Number.isFinite(new Date(start).getTime()) || !Number.isFinite(new Date(end).getTime())) {
+                  invalidCount += 1;
+                  return [];
+                }
+                return [{
+                  id: opaqueEventId(calendar.id, item.id), title: String(item.summary || "Busy"), start, end,
+                  allDay: Boolean(item.start?.date && !item.start?.dateTime), location: String(item.location || ""),
+                  url: safeGoogleUrl(item.htmlLink, new Set(["calendar.google.com", "www.google.com"])),
+                  calendar: String(calendar.summary || (calendar.primary ? "Primary" : "Subscribed calendar"))
+                }];
+              });
+              return {
+                reauthorize: false, loaded: true, events, truncated: Boolean(data.nextPageToken),
+                warning: invalidCount ? { code: "calendar_invalid_events", calendar: String(calendar.summary || (calendar.primary ? "Primary" : "Subscribed calendar")) } : null
+              };
             } catch (error) {
-              if (error.status === 401) throw error;
-              return { reauthorize: false, events: [] };
+              if (error.status === 401) return { reauthorize: true, loaded: false, events: [] };
+              return {
+                reauthorize: false,
+                loaded: false,
+                events: [],
+                truncated: false,
+                warning: { code: error.code || "calendar_unavailable", calendar: String(calendar.summary || (calendar.primary ? "Primary" : "Subscribed calendar")) }
+              };
             }
           }));
           if (eventGroups.some(group => group.reauthorize)) return send(res, 409, JSON.stringify({ error: "reauthorization_required" }), "application/json; charset=utf-8");
-          const events = eventGroups.flatMap(group => group.events).sort((left, right) => String(left.start).localeCompare(String(right.start)));
-          return send(res, 200, JSON.stringify({ source: `Google Calendar · ${calendars.length} selected calendar${calendars.length === 1 ? "" : "s"} · read-only`, events }), "application/json; charset=utf-8");
+          const events = eventGroups.flatMap(group => group.events).sort((left, right) => new Date(left.start).getTime() - new Date(right.start).getTime());
+          const warnings = eventGroups.map(group => group.warning).filter(Boolean);
+          if (calendarListHasMore) warnings.push({ code: "calendar_list_truncated", calendar: "Additional calendars were not inspected; selected calendars may be missing" });
+          if (selectedCalendarCapReached) warnings.push({ code: "selected_calendar_limit", calendar: "More than 50 known selected calendars" });
+          const loadedCount = eventGroups.filter(group => group.loaded).length;
+          const source = calendarListHasMore
+            ? `Google Calendar · ${loadedCount} selected calendars loaded; additional calendars were not inspected and selected calendars may be missing · read-only`
+            : selectedCalendarCapReached
+              ? `Google Calendar · ${loadedCount} of ${selectedCalendars.length} known selected calendars loaded; limited to 50 · read-only`
+            : `Google Calendar · ${loadedCount} of ${calendars.length} selected calendar${calendars.length === 1 ? "" : "s"} loaded · read-only`;
+          return send(res, 200, JSON.stringify({
+            source,
+            partial: warnings.length > 0,
+            truncated: calendarListTruncated || eventGroups.some(group => group.truncated),
+            warnings,
+            events
+          }), "application/json; charset=utf-8");
         } catch (error) {
-          const status = error.status === 401 || error.status === 403 ? 409 : 502;
+          const status = error.status === 401 ? 409 : 502;
           return send(res, status, JSON.stringify({ error: status === 409 ? "reauthorization_required" : "calendar_unavailable" }), "application/json; charset=utf-8");
         }
       }
@@ -405,19 +480,27 @@ function createApp(options = {}) {
         const query = String(requestUrl.searchParams.get("q") || "").trim().slice(0, 100);
         const escaped = query.replace(/['\\]/g, character => `\\${character}`);
         const target = new URL(GOOGLE_DRIVE_ENDPOINT);
-        const params = { pageSize: "25", orderBy: "modifiedTime desc", fields: "files(id,name,mimeType,modifiedTime,webViewLink,iconLink)" };
+        const params = { pageSize: "100", orderBy: "modifiedTime desc", fields: "nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,iconLink)" };
         params.q = query ? `trashed = false and name contains '${escaped}'` : "trashed = false";
         target.search = new URLSearchParams(params);
         try {
           const data = await googleJson(session, target);
           if (data.reauthorize) return send(res, 409, JSON.stringify({ error: "reauthorization_required" }), "application/json; charset=utf-8");
-          const files = Array.isArray(data.files) ? data.files.map(item => ({
+          if (!Array.isArray(data.files)) throw new Error("Drive files response invalid");
+          if (data.files.some(item => !item || typeof item !== "object" || typeof item.id !== "string" || !item.id || typeof item.name !== "string" || !item.name)) throw new Error("Drive file item invalid");
+          const files = data.files.map(item => ({
             id: String(item.id || ""), name: String(item.name || "Untitled"), mimeType: String(item.mimeType || ""),
-            modifiedTime: String(item.modifiedTime || ""), url: String(item.webViewLink || ""), icon: String(item.iconLink || "")
-          })) : [];
-          return send(res, 200, JSON.stringify({ source: "Google Drive metadata · read-only", files }), "application/json; charset=utf-8");
+            modifiedTime: String(item.modifiedTime || ""),
+            url: safeGoogleUrl(item.webViewLink, new Set(["drive.google.com", "docs.google.com"])),
+            icon: safeGoogleUrl(item.iconLink, new Set(["drive-thirdparty.googleusercontent.com", "lh3.googleusercontent.com"]))
+          }));
+          const truncated = Boolean(data.nextPageToken);
+          const source = truncated
+            ? `Google Drive metadata · first page returned ${files.length} filename match${files.length === 1 ? "" : "es"}; additional pages exist · read-only`
+            : `Google Drive metadata · ${files.length} filename match${files.length === 1 ? "" : "es"} returned · read-only`;
+          return send(res, 200, JSON.stringify({ source, truncated, files }), "application/json; charset=utf-8");
         } catch (error) {
-          const status = error.status === 401 || error.status === 403 ? 409 : 502;
+          const status = error.status === 401 ? 409 : 502;
           return send(res, status, JSON.stringify({ error: status === 409 ? "reauthorization_required" : "drive_unavailable" }), "application/json; charset=utf-8");
         }
       }
@@ -442,7 +525,14 @@ function createApp(options = {}) {
       if (filePath !== rootDir && !filePath.startsWith(`${rootDir}${path.sep}`)) return send(res, 400, "Bad request");
       let stat; try { stat = await fs.promises.stat(filePath); } catch {}
       if (!stat || !stat.isFile()) return send(res, 404, "Not found");
-      res.writeHead(200, securityHeaders(CONTENT_TYPES[path.extname(filePath).toLowerCase()] || "application/octet-stream"));
+      const contentType = CONTENT_TYPES[path.extname(filePath).toLowerCase()] || "application/octet-stream";
+      if (selected === "index.html") {
+        const cleanHtml = sanitizeIndexHtml(await fs.promises.readFile(filePath, "utf8"));
+        const body = Buffer.from(cleanHtml, "utf8");
+        res.writeHead(200, { ...securityHeaders(contentType), "Content-Length": body.length });
+        return res.end(req.method === "HEAD" ? undefined : body);
+      }
+      res.writeHead(200, securityHeaders(contentType));
       if (req.method === "HEAD") return res.end();
       fs.createReadStream(filePath).on("error", () => res.destroy()).pipe(res);
     } catch (error) {

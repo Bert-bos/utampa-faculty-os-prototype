@@ -12,7 +12,7 @@ const { createApp, createGoogleOAuthProvider } = require("../server");
 const CLIENT_ID = "synthetic-client-id.apps.googleusercontent.com";
 const CLIENT_SECRET = "synthetic-client-secret";
 const REDIRECT_URI = "https://utampa.example/auth/google/callback";
-const ALLOWED_EMAIL = "bert@utampa.edu";
+const ALLOWED_EMAIL = "bert@bertseither.com";
 const SECRET = "0123456789abcdef0123456789abcdef";
 
 function fakeOAuth(identity = { sub: "google-subject-123", email: ALLOWED_EMAIL }) {
@@ -33,7 +33,7 @@ function fakeOAuth(identity = { sub: "google-subject-123", email: ALLOWED_EMAIL 
 
 async function fixture(t, options = {}) {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "utampa-oauth-"));
-  fs.writeFileSync(path.join(rootDir, "index.html"), "<h1>PRIVATE DASHBOARD MARKER</h1>");
+  fs.writeFileSync(path.join(rootDir, "index.html"), '<h1>PRIVATE DASHBOARD MARKER →</h1><script>window.legitimateInline=true;</script><script>window.__CF$cv$params={};var src="/cdn-cgi/challenge-platform/scripts/jsd/main.js";</script>');
   fs.mkdirSync(path.join(rootDir, "data"));
   fs.mkdirSync(path.join(rootDir, "assets"));
   fs.writeFileSync(path.join(rootDir, "data", "fixture.json"), JSON.stringify({ synthetic: true }));
@@ -91,6 +91,8 @@ test("sign-in surface is neutral, accessible, touch-sized, and contains no local
   assert.match(body, /role="status"/);
   assert.match(body, /aria-live="polite"/);
   assert.match(body, /aria-describedby="auth-disclosure"/);
+  assert.match(body, /read-only Calendar event metadata and Drive filename metadata visible to this personal Google account/);
+  assert.match(body, /University accounts, Canvas, Workday, student records, and institutional systems are not connected/);
   assert.match(body, /Opening Google sign-in/);
   assert.doesNotMatch(body, /type="password"|name="username"/);
   const error = await fetch(`${origin}/login?error=sign-in`);
@@ -145,6 +147,8 @@ test("verified allowlisted identity creates an opaque revocable session and pres
   const dashboard = await fetch(`${origin}/`, { headers: { Cookie: signed.sessionCookie } });
   assert.equal(dashboard.status, 200);
   assert.match(await dashboard.text(), /PRIVATE DASHBOARD MARKER/);
+  const me = await fetch(`${origin}/api/me`, { headers: { Cookie: signed.sessionCookie } });
+  assert.deepEqual(await me.json(), { email: ALLOWED_EMAIL, connected: false });
   const deepLink = await fetch(`${origin}/service/spartan-incubator`, { headers: { Cookie: signed.sessionCookie } });
   assert.match(await deepLink.text(), /PRIVATE DASHBOARD MARKER/);
   const external = await fetch(`${origin}/auth/google?next=${encodeURIComponent("//evil.example")}`, { redirect: "manual" });
@@ -182,6 +186,25 @@ test("authenticated delivery allowlists approved assets and denies repository, h
     const response = await fetch(`${origin}${route}`, { headers: { Cookie: sessionCookie }, redirect: "manual" });
     assert.equal(response.status, 404, route);
     assert.doesNotMatch(await response.text(), /SERVER SOURCE|private|PRIVATE DASHBOARD MARKER|synthetic/i, route);
+  }
+});
+
+test("authenticated index delivery removes only exported Cloudflare challenge code for GET and HEAD", async t => {
+  const { origin } = await fixture(t);
+  const { sessionCookie } = await signIn(origin);
+  for (const route of ["/", "/service/spartan-incubator"]) {
+    const response = await fetch(`${origin}${route}`, { headers: { Cookie: sessionCookie } });
+    const body = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(body, /PRIVATE DASHBOARD MARKER →/);
+    assert.match(body, /window\.legitimateInline=true/);
+    assert.doesNotMatch(body, /__CF\$cv\$params|challenge-platform/);
+    assert.equal(Number(response.headers.get("content-length")), Buffer.byteLength(body));
+    const head = await fetch(`${origin}${route}`, { method: "HEAD", headers: { Cookie: sessionCookie } });
+    assert.equal(head.status, 200);
+    assert.equal(await head.text(), "");
+    assert.equal(head.headers.get("content-length"), response.headers.get("content-length"));
+    assert.match(head.headers.get("content-type"), /^text\/html/);
   }
 });
 
@@ -249,6 +272,12 @@ test("Google provider verifies token signature and required claims", async () =>
       : new Response(JSON.stringify({ keys: [jwk] }), { status: 200, headers: { "content-type": "application/json" } })
   });
   await assert.rejects(() => conflictingProvider.exchangeAndVerify({ code: "code", codeVerifier: "verifier", expectedNonce: "expected-nonce" }), /claims rejected/);
+
+  const revokedProvider = createGoogleOAuthProvider({
+    clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: REDIRECT_URI, now: () => now,
+    fetchImpl: async () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400, headers: { "content-type": "application/json" } })
+  });
+  await assert.rejects(() => revokedProvider.refresh("revoked-refresh-token"), error => error.message === "Google access refresh failed" && error.status === 401);
 });
 
 test("authorized Calendar and Drive API routes proxy only read-only sanitized data", async t => {
@@ -266,7 +295,7 @@ test("authorized Calendar and Drive API routes proxy only read-only sanitized da
     ] }), { status: 200, headers: { "content-type": "application/json" } });
     if (String(url).includes("/calendars/primary%40example.com/events")) return new Response(JSON.stringify({ items: [{ id: "event-1", summary: "ENT 330", description: "must not leak", start: { dateTime: "2026-09-22T16:00:00Z" }, end: { dateTime: "2026-09-22T17:00:00Z" }, htmlLink: "https://calendar.google.com/event" }] }), { status: 200, headers: { "content-type": "application/json" } });
     if (String(url).includes("/calendars/outlook-feed%40import.calendar.google.com/events")) return new Response(JSON.stringify({ items: [{ id: "event-2", summary: "Office hours", start: { dateTime: "2026-09-22T18:00:00Z" }, end: { dateTime: "2026-09-22T19:00:00Z" }, htmlLink: "https://calendar.google.com/event-2" }] }), { status: 200, headers: { "content-type": "application/json" } });
-    return new Response(JSON.stringify({ files: [{ id: "file-1", name: "ENT 330 deck", mimeType: "application/vnd.google-apps.presentation", modifiedTime: "2026-09-22T12:00:00Z", webViewLink: "https://drive.google.com/file" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({ files: [{ id: "file-1", name: "ENT 330 deck", mimeType: "application/vnd.google-apps.presentation", modifiedTime: "2026-09-22T12:00:00Z", webViewLink: "https://drive.google.com/file" }], nextPageToken: "more-drive-results" }), { status: 200, headers: { "content-type": "application/json" } });
   };
   const { origin } = await fixture(t, { oauth, fetchImpl });
   const { sessionCookie } = await signIn(origin);
@@ -275,16 +304,153 @@ test("authorized Calendar and Drive API routes proxy only read-only sanitized da
   const calendarBody = await calendar.json();
   assert.equal(calendarBody.events[0].title, "ENT 330");
   assert.equal(calendarBody.events[0].description, undefined);
+  assert.match(calendarBody.events[0].id, /^[A-Za-z0-9_-]{24}$/);
+  assert.doesNotMatch(calendarBody.events[0].id, /primary|example|event-1/);
   assert.equal(calendarBody.events[1].title, "Office hours");
   assert.equal(calendarBody.events[1].calendar, "UTampa Outlook");
+  assert.equal(calendarBody.partial, false);
+  assert.equal(calendarBody.truncated, false);
+  assert.deepEqual(calendarBody.warnings, []);
   const drive = await fetch(`${origin}/api/drive?q=ENT%20330`, { headers: { Cookie: sessionCookie } });
   assert.equal(drive.status, 200);
-  assert.equal((await drive.json()).files[0].name, "ENT 330 deck");
+  const driveBody = await drive.json();
+  assert.equal(driveBody.files[0].name, "ENT 330 deck");
+  assert.equal(driveBody.truncated, true);
+  assert.match(driveBody.source, /first page returned 1 filename match; additional pages exist/);
   assert.ok(requests.every(request => request.options.headers.Authorization === "Bearer access-token"));
   assert.ok(requests.some(request => request.url.includes("/users/me/calendarList")));
   assert.ok(requests.some(request => request.url.includes("outlook-feed%40import.calendar.google.com/events")));
   assert.ok(!requests.some(request => request.url.includes("holidays%40example.com/events")));
   assert.ok(requests.some(request => /trashed/.test(request.url)));
+});
+
+test("Calendar reports partial and truncated source state without leaking source identifiers", async t => {
+  const oauth = fakeOAuth({
+    sub: "google-subject-123", email: ALLOWED_EMAIL, accessToken: "access-token", refreshToken: "refresh-token",
+    accessTokenExpiresAt: Date.now() + 3600000, grantedScope: "calendar.readonly"
+  });
+  const fetchImpl = async url => {
+    const value = String(url);
+    if (value.includes("/users/me/calendarList")) return new Response(JSON.stringify({ items: [
+      { id: "primary@example.com", summary: "Personal", primary: true, selected: true },
+      { id: "outlook-feed@import.calendar.google.com", summary: "UTampa Outlook", selected: true },
+      { id: "limited@example.com", summary: "Limited source", selected: true }
+    ] }), { status: 200, headers: { "content-type": "application/json" } });
+    if (value.includes("primary%40example.com")) return new Response(JSON.stringify({ items: [{
+      id: "private-upstream-id", summary: "Spartan Incubator review",
+      start: { dateTime: "2026-09-24T16:00:00Z" }, end: { dateTime: "2026-09-24T17:00:00Z" },
+      htmlLink: "javascript:alert(1)"
+    }], nextPageToken: "more-results-exist" }), { status: 200, headers: { "content-type": "application/json" } });
+    if (value.includes("outlook-feed%40import.calendar.google.com")) return new Response(JSON.stringify({ items: [] }), { status: 500, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({ items: [] }), { status: 403, headers: { "content-type": "application/json" } });
+  };
+  const { origin } = await fixture(t, { oauth, fetchImpl });
+  const { sessionCookie } = await signIn(origin);
+  const response = await fetch(`${origin}/api/calendar`, { headers: { Cookie: sessionCookie } });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.partial, true);
+  assert.equal(body.truncated, true);
+  assert.equal(body.warnings.length, 2);
+  assert.match(body.source, /1 of 3 selected calendars loaded/);
+  assert.equal(body.events.length, 1);
+  assert.equal(body.events[0].url, "");
+  assert.doesNotMatch(JSON.stringify(body), /primary@example|private-upstream-id|outlook-feed@/);
+});
+
+test("Calendar rejects invalid or over-broad time ranges", async t => {
+  const oauth = fakeOAuth({
+    sub: "google-subject-123", email: ALLOWED_EMAIL, accessToken: "access-token", refreshToken: "refresh-token",
+    accessTokenExpiresAt: Date.now() + 3600000, grantedScope: "calendar.readonly"
+  });
+  const { origin } = await fixture(t, { oauth, fetchImpl: async () => new Response("{}", { status: 200 }) });
+  const { sessionCookie } = await signIn(origin);
+  for (const query of ["timeMin=not-a-number", "timeMin=1000&timeMax=999", `timeMin=0&timeMax=${32 * 24 * 60 * 60 * 1000}`]) {
+    const response = await fetch(`${origin}/api/calendar?${query}`, { headers: { Cookie: sessionCookie } });
+    assert.equal(response.status, 400, query);
+    assert.deepEqual(await response.json(), { error: "invalid_time_range" });
+  }
+});
+
+test("revoked refresh requires reauthorization while upstream 403 remains an unavailable source", async t => {
+  const expiredIdentity = {
+    sub: "google-subject-123", email: ALLOWED_EMAIL, accessToken: "expired-token", refreshToken: "revoked-token",
+    accessTokenExpiresAt: 1, grantedScope: "calendar.readonly drive.metadata.readonly"
+  };
+  const revokedOauth = fakeOAuth(expiredIdentity);
+  revokedOauth.refresh = async () => { const error = new Error("Google access refresh failed"); error.status = 401; throw error; };
+  const revoked = await fixture(t, { oauth: revokedOauth, now: () => 2_000_000_000_000 });
+  const revokedSession = await signIn(revoked.origin);
+  for (const route of ["/api/calendar", "/api/drive?q=test"]) {
+    const response = await fetch(`${revoked.origin}${route}`, { headers: { Cookie: revokedSession.sessionCookie } });
+    assert.equal(response.status, 409, route);
+    assert.deepEqual(await response.json(), { error: "reauthorization_required" }, route);
+  }
+
+  const rateLimitedOauth = fakeOAuth({ ...expiredIdentity, accessToken: "valid-token", accessTokenExpiresAt: 2_000_000_100_000 });
+  const rateLimited = await fixture(t, {
+    oauth: rateLimitedOauth, now: () => 2_000_000_000_000,
+    fetchImpl: async () => new Response(JSON.stringify({ error: { errors: [{ reason: "rateLimitExceeded" }] } }), { status: 403, headers: { "content-type": "application/json" } })
+  });
+  const rateLimitedSession = await signIn(rateLimited.origin);
+  for (const route of ["/api/calendar", "/api/drive?q=test"]) {
+    const response = await fetch(`${rateLimited.origin}${route}`, { headers: { Cookie: rateLimitedSession.sessionCookie } });
+    assert.equal(response.status, 502, route);
+    assert.deepEqual(await response.json(), { error: route.includes("calendar") ? "calendar_unavailable" : "drive_unavailable" }, route);
+  }
+});
+
+test("Calendar list pagination is disclosed and invalid upstream collections never become verified empty", async t => {
+  const oauth = fakeOAuth({
+    sub: "google-subject-123", email: ALLOWED_EMAIL, accessToken: "access-token", refreshToken: "refresh-token",
+    accessTokenExpiresAt: Date.now() + 3600000, grantedScope: "calendar.readonly drive.metadata.readonly"
+  });
+  let calendarMode = "truncated-list";
+  const fetchImpl = async url => {
+    const value = String(url);
+    if (value.includes("/users/me/calendarList")) {
+      if (calendarMode === "invalid-list") return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+      if (calendarMode === "invalid-events" || calendarMode === "malformed-event") return new Response(JSON.stringify({ items: [{ id: "primary", summary: "Primary", primary: true }]}), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ items: [{ id: "primary", summary: "Primary", primary: true }], nextPageToken: "more-calendars" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (value.includes("/calendars/")) return new Response(calendarMode === "invalid-events" ? "{}" : calendarMode === "malformed-event" ? JSON.stringify({ items: [{ id: "bad-event", summary: "Missing times" }] }) : JSON.stringify({ items: [] }), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const { origin } = await fixture(t, { oauth, fetchImpl });
+  const { sessionCookie } = await signIn(origin);
+
+  const truncated = await fetch(`${origin}/api/calendar`, { headers: { Cookie: sessionCookie } });
+  const truncatedBody = await truncated.json();
+  assert.equal(truncated.status, 200);
+  assert.equal(truncatedBody.partial, true);
+  assert.equal(truncatedBody.truncated, true);
+  assert.ok(truncatedBody.warnings.some(warning => warning.code === "calendar_list_truncated"));
+  assert.match(truncatedBody.source, /additional calendars were not inspected and selected calendars may be missing/);
+
+  calendarMode = "invalid-events";
+  const invalidEvents = await fetch(`${origin}/api/calendar`, { headers: { Cookie: sessionCookie } });
+  const invalidEventsBody = await invalidEvents.json();
+  assert.equal(invalidEvents.status, 200);
+  assert.equal(invalidEventsBody.partial, true);
+  assert.equal(invalidEventsBody.events.length, 0);
+  assert.ok(invalidEventsBody.warnings.some(warning => warning.code === "calendar_invalid_response"));
+
+  calendarMode = "malformed-event";
+  const malformedEvent = await fetch(`${origin}/api/calendar`, { headers: { Cookie: sessionCookie } });
+  const malformedEventBody = await malformedEvent.json();
+  assert.equal(malformedEvent.status, 200);
+  assert.equal(malformedEventBody.partial, true);
+  assert.equal(malformedEventBody.events.length, 0);
+  assert.ok(malformedEventBody.warnings.some(warning => warning.code === "calendar_invalid_events"));
+
+  calendarMode = "invalid-list";
+  const invalidList = await fetch(`${origin}/api/calendar`, { headers: { Cookie: sessionCookie } });
+  assert.equal(invalidList.status, 502);
+  assert.deepEqual(await invalidList.json(), { error: "calendar_unavailable" });
+
+  const invalidDrive = await fetch(`${origin}/api/drive?q=test`, { headers: { Cookie: sessionCookie } });
+  assert.equal(invalidDrive.status, 502);
+  assert.deepEqual(await invalidDrive.json(), { error: "drive_unavailable" });
 });
 
 test("repository data contract stays synthetic and unknown is never coerced to zero", () => {
@@ -301,4 +467,22 @@ test("repository data contract stays synthetic and unknown is never coerced to z
   assert.equal(context.window.__ccIncubatorAdapterV1.formatCount(null), "no data");
   assert.equal(context.window.__ccIncubatorAdapterV1.formatCount(undefined), "no data");
   assert.equal(context.window.__ccIncubatorAdapterV1.formatCount(0), "0");
+});
+
+test("runtime and exact-head evidence enforce the owner-approved personal identity", () => {
+  const root = path.resolve(__dirname, "..");
+  const checkedFiles = [
+    "server.js",
+    "test/server.test.js",
+    ".github/workflows/browser-evidence.yml",
+    "docs/RELEASE-HANDOFF.md",
+    "CLAUDE-HANDOFF.md"
+  ];
+  for (const relativePath of checkedFiles) {
+    const source = fs.readFileSync(path.join(root, relativePath), "utf8");
+    assert.doesNotMatch(source, /bert@utampa\.edu/i, relativePath);
+  }
+  const evidenceWorkflow = fs.readFileSync(path.join(root, ".github/workflows/browser-evidence.yml"), "utf8");
+  assert.match(evidenceWorkflow, /UTAMPA_ALLOWED_EMAIL:\s*bert@bertseither\.com/);
+  assert.match(evidenceWorkflow, /injected synthetic Google OIDC[^\n]*no real account or token/);
 });

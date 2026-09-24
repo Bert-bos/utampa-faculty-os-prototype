@@ -33,7 +33,7 @@
 
 .cc-rec__close {
   position: absolute; top: 12px; right: 14px;
-  width: 32px; height: 32px; border: 0; border-radius: 8px;
+  width: 44px; height: 44px; border: 0; border-radius: 8px;
   background: transparent; color: #64748b;
   font-size: 21px; line-height: 1; cursor: pointer;
 }
@@ -86,6 +86,7 @@
 .cc-rec__btn {
   appearance: none; border: 1px solid rgba(15, 23, 42, .14);
   background: #fff; color: #0f172a;
+  min-height: 44px;
   border-radius: 10px; padding: 9px 15px;
   font: 600 13px/1 inherit; cursor: pointer;
   transition: background .14s ease, border-color .14s ease, opacity .14s ease;
@@ -106,7 +107,7 @@
 .cc-rec__label { font-size: 12px; font-weight: 700; color: #334155; }
 .cc-rec__destrow { display: flex; gap: 8px; align-items: stretch; min-width: 0; }
 .cc-rec__select {
-  flex: 1 1 auto; min-width: 0;
+  flex: 1 1 auto; min-width: 0; min-height: 44px;
   border: 1px solid rgba(15, 23, 42, .18); border-radius: 10px;
   padding: 9px 11px; font: 400 13px/1.2 inherit; background: #fff; color: #0f172a;
 }
