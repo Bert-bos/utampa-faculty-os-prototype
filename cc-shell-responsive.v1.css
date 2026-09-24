@@ -60,6 +60,11 @@
      Let the box grow to fit its now-two-row content. */
   .global-header { height: auto !important; }
 
+  /* UTampa also fixes .unifiedHeader at 78px above its 760px breakpoint.
+     The shared switcher's second row must contribute to the header height;
+     otherwise it covers the section tabs in tablet and landscape widths. */
+  .unifiedHeader { height: auto !important; }
+
   .centeredSwitcher,
   .workspace-switcher,
   .product-switcher {

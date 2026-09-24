@@ -572,7 +572,7 @@
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     });
     inertSiblings(shade);
-    if (close) setTimeout(function () { if (shade.isConnected) close.focus(); }, 0);
+    if (close && shade.isConnected) close.focus();
   }
   function showAccount() {
     var drawer = loadingDrawer("Account and data boundary");
@@ -686,14 +686,22 @@
       scheduleActivePage(60);
     }
   });
+  function reconcileObservedDom() {
+    wireHeader(); applyTaskState(); syncSectionAccessibility(); clarifyNativeProvenance(currentPage()); enhanceNativeDialogs();
+    document.querySelectorAll(".drawer:not(.ut-live-drawer)").forEach(enhanceTaskDrawer);
+  }
   var observer = new MutationObserver(function () {
     if (observerWorkTimer !== null) return;
+    /* Apply safety labels and dialog semantics in the mutation microtask so
+       newly committed native drawers never expose the old connected-source
+       claim for a frame. Re-run after the coalescing window so a second
+       meaningful mutation cannot be lost while the guard is active. */
     observerWorkTimer = setTimeout(function () {
       observerWorkTimer = null;
-      wireHeader(); applyTaskState(); syncSectionAccessibility(); clarifyNativeProvenance(currentPage()); enhanceNativeDialogs();
-      document.querySelectorAll(".drawer:not(.ut-live-drawer)").forEach(enhanceTaskDrawer);
+      reconcileObservedDom();
       scheduleActivePage(0);
     }, 0);
+    reconcileObservedDom();
   });
   function scheduleActivePage(delay) {
     if (activePageTimer !== null) clearTimeout(activePageTimer);

@@ -469,6 +469,23 @@ test("repository data contract stays synthetic and unknown is never coerced to z
   assert.equal(context.window.__ccIncubatorAdapterV1.formatCount(0), "0");
 });
 
+test("browser bootstrap waits for embedded RSC data and add-ons wait for the first React commit", () => {
+  const root = path.resolve(__dirname, "..");
+  const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
+  const runtime = fs.readFileSync(path.join(root, "assets", "index-D9RxFjnm.js"), "utf8");
+  const evidence = fs.readFileSync(path.join(root, ".github", "workflows", "browser-evidence.yml"), "utf8");
+
+  assert.match(html, /<script type="module" id="_R_">import\("\/assets\/index-D9RxFjnm\.js"\)<\/script>/);
+  assert.match(html, /<link rel="stylesheet" href="\/utampa-live\.v1\.css">/);
+  assert.doesNotMatch(html, /<script src="\/cc-/);
+  assert.match(html, /addEventListener\("utampa:app-committed",start,\{once:true\}\)/);
+  assert.match(html, /files=\["\/utampa-live\.v1\.js","\/cc-workspace-switcher\.v2\.js"/);
+  assert.match(html, /script\.onerror=function\(\)\{[^}]*loadNext\(index\+1\)/);
+  assert.match(runtime, /__UTAMPA_APP_COMMITTED__[\s\S]*utampa:app-committed[\s\S]*attachBrowserRouterState/);
+  assert.match(evidence, /window\.__UTAMPA_APP_COMMITTED__ === true/);
+  assert.match(evidence, /hasText: 'Teaching'[\s\S]*waitForSelector\('\.focusCourse'\)[\s\S]*hasText: 'Today'/);
+});
+
 test("runtime and exact-head evidence enforce the owner-approved personal identity", () => {
   const root = path.resolve(__dirname, "..");
   const checkedFiles = [

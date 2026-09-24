@@ -60,6 +60,7 @@ jobs:
           const { chromium } = require('playwright');
           const base = 'http://127.0.0.1:4175';
           const evidence = { exactHead: process.env.RC_SHA, identity: 'injected synthetic Google OIDC for bert@bertseither.com; no real account or token', data: 'committed prototype interface plus browser-routed synthetic Calendar/Drive metadata fixtures; no external private/protected source or real account was queried', screenshots: [], checks: {}, failures: [] };
+          const diagnostics = [];
           const assert = (ok, message) => { if (!ok) evidence.failures.push(message); };
           async function shot(page, name, authState) {
             await page.screenshot({ path: 'evidence/' + name + '.png', fullPage: true });
@@ -83,16 +84,11 @@ jobs:
             return { reached: false };
           }
           async function waitForAppHydrated(page) {
-            await page.waitForFunction(() => {
-              const teaching = Array.from(document.querySelectorAll('.sectionTabs button')).find(button => /Teaching/.test(button.textContent || ''));
-              if (!document.querySelector('.focusCourse')) teaching?.click();
-              return Boolean(document.querySelector('.focusCourse'));
-            });
-            await page.waitForFunction(() => {
-              const today = Array.from(document.querySelectorAll('.sectionTabs button')).find(button => /Today/.test(button.textContent || ''));
-              if (!document.querySelector('.todayDirective')) today?.click();
-              return Boolean(document.querySelector('.todayDirective'));
-            });
+            await page.waitForFunction(() => window.__UTAMPA_APP_COMMITTED__ === true);
+            await page.locator('.sectionTabs button', { hasText: 'Teaching' }).click();
+            await page.waitForSelector('.focusCourse');
+            await page.locator('.sectionTabs button', { hasText: 'Today' }).click();
+            await page.waitForSelector('.todayDirective');
           }
           async function login(page, next = '/') {
             await page.goto(base + '/login?next=' + encodeURIComponent(next), { waitUntil: 'domcontentloaded' });
@@ -118,7 +114,6 @@ jobs:
           (async () => {
             const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
             evidence.runtime = { node: process.version, playwright: require('playwright/package.json').version, browser: await browser.version() };
-            const diagnostics = [];
             async function newPage(options) {
               const page = await browser.newPage(options);
               page.on('pageerror', error => diagnostics.push('pageerror: ' + String(error)));
@@ -362,9 +357,11 @@ jobs:
               await reviewChanges.click();
               await service.waitForSelector('.drawer[role="dialog"][aria-modal="true"]');
               assert(await service.locator('.drawer').isVisible(), 'native React drawer reopens in the same session after intercepted action');
+              assert(await service.locator('.topShell').evaluate(node => node.inert), 'native React drawer makes the background inert');
               await service.keyboard.press('Escape');
               await service.waitForSelector('.drawerShade', { state: 'detached' });
               assert(await reviewChanges.evaluate(node => document.activeElement === node), 'native drawer Escape restores opener focus');
+              assert(!await service.locator('.topShell').evaluate(node => node.inert), 'native drawer Escape restores background interaction');
               await service.locator('.sectionTabs button', { hasText: 'Service' }).click();
               await service.waitForSelector('.serviceTopGrid');
               await service.waitForSelector('.ut-source-status[data-page="Service"]');
@@ -376,7 +373,8 @@ jobs:
               assert(/Spartan Incubator Calendar title match 1/.test(await service.locator('.ut-service-schedule-body').innerText()), 'Service schedule uses authorized Calendar event metadata');
               assert(/AUTHORIZED CALENDAR TITLE MATCHES/.test(await service.locator('.lecCalendar').innerText()), 'Service title matching has precise provenance');
               assert(/affiliation is not verified/i.test(await service.locator('.lecCalendar').innerText()), 'Service does not infer program affiliation from title keywords');
-              await service.getByRole('button', { name: 'Share with founder', exact: true }).first().click();
+              const founderReviewOpener = service.getByRole('button', { name: 'Share with founder', exact: true }).first();
+              await founderReviewOpener.click();
               await service.waitForSelector('.reviewModal[role="dialog"][aria-modal="true"]');
               const reviewGeometry = await service.locator('.reviewModal').evaluate(node => {
                 const box = node.getBoundingClientRect();
@@ -386,6 +384,15 @@ jobs:
               assert(reviewGeometry.top >= -1 && reviewGeometry.bottom <= reviewGeometry.viewport + 1, 'landscape review modal stays within viewport bounds');
               assert(/auto|scroll/.test(reviewGeometry.overflowY), 'landscape review modal remains scrollable');
               assert(reviewGeometry.closeWidth >= 44 && reviewGeometry.closeHeight >= 44, 'native modal close target is touch sized');
+              assert(await service.locator('.topShell').evaluate(node => node.inert), 'native founder-review modal makes the background inert');
+              await service.locator('.reviewModal').getByRole('button', { name: /Record revision/i }).click();
+              await service.waitForSelector('.ut-live-drawer');
+              assert(/No audio was captured and no automated revision was created/.test(await service.locator('.ut-live-drawer').innerText()), 'Record revision transitions to a truthful no-capture boundary');
+              await service.locator('.ut-live-drawer .drawerClose').click();
+              assert(await founderReviewOpener.evaluate(node => document.activeElement === node), 'Record revision boundary restores the original native-modal opener');
+              assert(!await service.locator('.topApp').evaluate(node => node.inert), 'Record revision boundary restores background interaction when closed');
+              await founderReviewOpener.click();
+              await service.waitForSelector('.reviewModal[role="dialog"][aria-modal="true"]');
               await service.locator('.reviewModal').getByRole('button', { name: 'Share with founder', exact: true }).click();
               await service.waitForSelector('.ut-live-drawer');
               assert(/No connected-system action occurred/.test(await service.locator('.ut-live-drawer').innerText()), 'external action stopped at truthful discard boundary');
@@ -622,7 +629,7 @@ jobs:
               fs.writeFileSync('evidence/evidence.json', JSON.stringify(evidence, null, 2));
               if (evidence.failures.length) process.exitCode = 1;
             } finally { await browser.close(); }
-          })().catch(error => { evidence.verdict = 'ERROR'; evidence.fatal = String(error.stack || error); fs.writeFileSync('evidence/evidence.json', JSON.stringify(evidence, null, 2)); console.error(error); process.exit(1); });
+          })().catch(error => { evidence.verdict = 'ERROR'; evidence.fatal = String(error.stack || error); evidence.diagnostics = diagnostics; fs.writeFileSync('evidence/evidence.json', JSON.stringify(evidence, null, 2)); console.error(error); process.exit(1); });
           NODE
           node evidence.cjs
 
